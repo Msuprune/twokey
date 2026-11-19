@@ -1,0 +1,16 @@
+<section id="catch">
+<p class="eyebrow">ЧТО ЛОВИМ</p>
+<h2>Девять классов опасных действий</h2>
+<div class="cards c3" style="gap:24px">
+<div class="card rise" style="--i:0; padding:32px"><h3>Базы данных</h3><p class="txt">DROP, TRUNCATE, DELETE и UPDATE без WHERE, сброс миграций</p></div>
+<div class="card rise" style="--i:1; padding:32px"><h3>Утечка секретов</h3><p class="txt">ключи AWS, GitHub, Stripe, LLM в коде и в URL, отправка .env</p></div>
+<div class="card rise" style="--i:2; padding:32px"><h3>Публичный доступ</h3><p class="txt">открытый репозиторий, бакет, порт, туннель ngrok</p></div>
+<div class="card rise" style="--i:3; padding:32px"><h3>Файлы и диски</h3><p class="txt">rm -rf по дому и проекту, find -delete, mkfs</p></div>
+<div class="card rise" style="--i:4; padding:32px"><h3>Git</h3><p class="txt">force push в main, reset --hard, git add .env</p></div>
+<div class="card rise" style="--i:5; padding:32px"><h3>Инфраструктура</h3><p class="txt">terraform destroy, kubectl delete, деплой в прод</p></div>
+<div class="card rise" style="--i:6; padding:32px"><h3>Чужой код</h3><p class="txt">curl | bash, закодированные команды</p></div>
+<div class="card rise" style="--i:7; padding:32px"><h3>MCP-инструменты</h3><p class="txt">delete, send, pay, deploy в имени инструмента</p></div>
+<div class="card hot rise" style="--i:8; padding:32px"><h3>Самозащита</h3><p class="txt">агент правит настройки защиты или выключает TwoKey</p></div>
+</div>
+<aside>Что именно мы ловим. Девять классов действий — от удаления базы до публикации бакета с паспортами клиентов в открытый доступ. Отдельно обратите внимание на последнюю карточку: если агент попытается отключить саму защиту — поправить свои настройки или остановить TwoKey, — это критический уровень. Сторож, которого можно выключить изнутри, не сторож.</aside>
+</section>
