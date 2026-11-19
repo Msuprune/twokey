@@ -3,3 +3,5 @@ audit.jsonl
 __pycache__/
 *.pyc
 allow.json
+rules.json
+*.tmp

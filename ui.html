@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TwoKey — панель</title>
+<style nonce="{{NONCE}}">
+:root {
+  color-scheme: dark;
+  --bg: #0E151D; --surface: #16202B; --surface-2: #1D2935; --line: #2A3847;
+  --text: #E9EEF3; --muted: #9AA7B4; --accent: #FF6B2C; --sky: #5CC8F0;
+  --crit: #FF5A4F; --high: #FF9A3C; --med: #F2C94C; --safe: #4FD1A5;
+  --radius: 12px;
+  --font: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: "Cascadia Mono", Consolas, "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(--font); }
+[hidden] { display: none !important; }
+a { color: var(--sky); }
+code, pre, .mono { font-family: var(--mono); }
+code { font-size: 0.92em; }
+h2 { font-size: 18px; margin: 28px 0 12px; }
+h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 6px; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+
+/* шапка */
+.top { border-bottom: 1px solid var(--line); background: var(--surface); }
+.top .wrap { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding-block: 14px; }
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.brand h1 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
+.brand h1 span { color: var(--accent); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); font-size: 13px; }
+.chip::before { content: ""; inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--muted); }
+.chip.on::before { background: var(--safe); }
+.chip.warn::before { background: var(--med); }
+.chip.bad::before { background: var(--crit); }
+
+/* вкладки */
+.tablist { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line); margin-top: 8px; scrollbar-width: none; }
+.tablist button { flex: none; position: relative; background: none; border: 0; color: var(--muted); font: inherit; padding: 12px 14px; cursor: pointer; }
+.tablist button:hover { color: var(--text); }
+.tablist button[aria-selected="true"] { color: var(--text); }
+.tablist button[aria-selected="true"]::after { content: ""; position: absolute; inset: auto 0 0; border-block-end: 3px solid var(--accent); }
+.count { display: inline-block; min-inline-size: 20px; padding: 0 6px; margin-inline-start: 6px; border-radius: 999px; background: var(--accent); color: var(--bg); font-size: 12px; font-weight: 700; text-align: center; }
+.pane { padding: 8px 0 48px; }
+
+/* уровни риска: всегда цвет + слово */
+.badge { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 12px; font-weight: 700; color: var(--bg); background: var(--muted); white-space: nowrap; }
+.badge.CRITICAL { background: var(--crit); }
+.badge.HIGH { background: var(--high); }
+.badge.MEDIUM { background: var(--med); }
+.badge.SAFE, .badge.LOW { background: var(--safe); }
+.badge.config { background: var(--sky); }
+
+/* кнопки */
+.btn { font: inherit; font-size: 14px; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); cursor: pointer; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+.btn.ok { background: var(--sky); border-color: var(--sky); color: var(--bg); font-weight: 600; }
+.btn.danger { background: transparent; border-color: var(--crit); color: var(--crit); font-weight: 600; }
+.btn.ghost { background: transparent; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* карточки решений */
+.empty { padding: 28px; border: 1px dashed var(--line); border-radius: var(--radius); color: var(--muted); text-align: center; }
+.card { background: var(--surface); border: 1px solid var(--line); border-inline-start: 4px solid var(--high); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; }
+.card.sev-critical { border-inline-start-color: var(--crit); }
+.card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.timer { margin-inline-start: auto; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+.action { background: #070B10; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; white-space: pre-wrap; word-break: break-word; margin: 12px 0 4px; max-block-size: 260px; overflow: auto; }
+.card ul { margin: 0; padding-inline-start: 20px; }
+.ai { color: var(--sky); margin: 10px 0 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.own { margin-top: 12px; display: grid; gap: 8px; }
+
+/* таблицы */
+.table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+table { inline-size: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: start; font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; padding: 10px 12px; background: var(--surface); }
+td { padding: 9px 12px; border-top: 1px solid var(--line); vertical-align: top; }
+td.act { font-family: var(--mono); font-size: 13px; min-inline-size: 14ch; max-inline-size: 460px; word-break: break-word; }
+td.when { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* правила */
+.toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin: 16px 0 4px; }
+.toolbar input { min-inline-size: 260px; }
+.group { margin-top: 22px; }
+.rule { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: start; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); margin-top: 8px; }
+.rule.off .rule-title { color: var(--muted); text-decoration: line-through; }
+.rule-title { font-weight: 600; cursor: pointer; }
+.rule-body p { margin: 2px 0 0; }
+.rule-meta { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; align-items: center; }
+
+/* переключатель: настоящий чекбокс с ролью switch поверх дорожки */
+.switch { position: relative; display: inline-block; inline-size: 44px; block-size: 26px; flex: none; margin-top: 1px; }
+.switch input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+.switch input:disabled { cursor: not-allowed; }
+.track { position: absolute; inset: 0; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); transition: background .15s; }
+.track::before { content: ""; position: absolute; inset-block-start: 3px; inset-inline-start: 3px; inline-size: 18px; block-size: 18px; border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s; }
+.switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + .track::before { transform: translateX(18px); background: var(--bg); }
+.switch input:focus-visible + .track { outline: 2px solid var(--sky); outline-offset: 2px; }
+.switch input:disabled + .track { opacity: .55; }
+
+/* формы */
+form.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; display: grid; gap: 14px; margin-top: 16px; }
+.field { display: grid; gap: 6px; }
+.field > span { font-weight: 600; }
+input[type="text"], input[type="search"], textarea { font: inherit; color: var(--text); background: #070B10; border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; inline-size: 100%; }
+textarea { font-family: var(--mono); resize: vertical; }
+input::placeholder, textarea::placeholder { color: #6B7886; }
+.check { display: flex; gap: 10px; align-items: flex-start; }
+.check input { margin-top: 4px; accent-color: var(--accent); }
+fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin: 0; display: grid; gap: 8px; }
+legend { font-weight: 600; padding: 0 6px; }
+.result { min-block-size: 22px; }
+.result.good { color: var(--safe); }
+.result.bad { color: var(--crit); }
+.result.info { color: var(--muted); }
+.examples { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0; }
+.examples .btn { font-family: var(--mono); font-size: 12px; }
+.verdict { display: flex; align-items: center; gap: 12px; font-size: 18px; margin: 18px 0 8px; }
+.verdict .badge { font-size: 15px; padding: 3px 12px; }
+.finding { padding: 10px 0; border-top: 1px solid var(--line); }
+.finding .hit { font-family: var(--mono); color: var(--high); }
+
+.gate { max-inline-size: 640px; margin: 80px auto; padding: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.toast { position: fixed; inset-inline: 0; inset-block-end: 20px; margin-inline: auto; inline-size: fit-content; max-inline-size: calc(100% - 32px); padding: 10px 16px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line); box-shadow: 0 8px 24px #0008; }
+.toast.err { border-color: var(--crit); }
+
+@media (max-width: 640px) {
+  .rule { grid-template-columns: auto 1fr; }
+  .rule-meta { grid-column: 2; justify-content: flex-start; }
+  .toolbar input { min-inline-size: 0; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (forced-colors: active) {
+  .track { border: 1px solid CanvasText; }
+  .switch input:checked + .track::before { background: Highlight; }
+  .tablist button[aria-selected="true"]::after { border-block-end-color: Highlight; }
+}
+</style>
+</head>
+<body>
+<noscript><p class="wrap">Для панели нужен включённый JavaScript.</p></noscript>
+
+<section class="gate" id="gate" hidden>
+  <h2>Нет доступа к панели</h2>
+  <p>Откройте панель по одноразовой ссылке. При запуске <code>python guardian.py serve</code> сервер печатает её
+     и сам открывает в браузере. Новую ссылку пришлёт бот в Telegram по команде <code>/panel</code>.</p>
+  <p class="muted small">Ссылка срабатывает один раз, а доступ сбрасывается при перезапуске сервера. Так агент не сможет управлять панелью, даже если найдёт старую ссылку.</p>
+</section>
+
+<div id="app">
+<header class="top">
+  <div class="wrap">
+    <div class="brand"><h1>Two<span>Key</span></h1><span class="muted small">второй ключ для ИИ-агентов</span></div>
+    <div class="chips">
+      <span class="chip" id="chip-conn">подключаемся…</span>
+      <span class="chip" id="chip-tg">Telegram</span>
+      <span class="chip" id="chip-judge">AI-судья</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="tablist" role="tablist" aria-label="Разделы панели">
+    <button type="button" role="tab" id="tab-decisions" data-panel="panel-decisions" aria-selected="true">Решения<span class="count" id="count" aria-hidden="true" hidden></span></button>
+    <button type="button" role="tab" id="tab-rules" data-panel="panel-rules" aria-selected="false" tabindex="-1">Правила</button>
+    <button type="button" role="tab" id="tab-custom" data-panel="panel-custom" aria-selected="false" tabindex="-1">Свои шаблоны</button>
+    <button type="button" role="tab" id="tab-check" data-panel="panel-check" aria-selected="false" tabindex="-1">Проверить команду</button>
+    <button type="button" role="tab" id="tab-allow" data-panel="panel-allow" aria-selected="false" tabindex="-1">Разрешено всегда</button>
+  </div>
+
+  <section role="tabpanel" id="panel-decisions" aria-labelledby="tab-decisions">
+    <div class="pane">
+      <h2>Ждут вашего решения</h2>
+      <div id="pending"><p class="empty">Загружаем…</p></div>
+      <h2>Журнал</h2>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th scope="col">Когда</th><th scope="col">Риск</th><th scope="col">Инструмент</th><th scope="col">Действие</th><th scope="col">Решение</th></tr></thead>
+          <tbody id="audit"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section role="tabpanel" id="panel-rules" aria-labelledby="tab-rules" hidden>
+    <div class="pane">
+      <div class="toolbar">
+        <label class="field"><span class="muted small">Найти правило</span>
+          <input type="search" id="rule-filter" placeholder="Например: git, DROP, ключ">
+        </label>
+        <p class="muted small" id="rules-summary"></p>
+      </div>
+      <div id="rules"></div>
+    </div>
+  </section>
+
+  <section role="tabpanel" id="panel-custom" aria-labelledby="tab-custom" hidden>
+    <div class="pane">
+      <p class="muted">Свой шаблон ловит то, чего нет во встроенных правилах: вашу таблицу платежей, внутренний сервер, опасный скрипт проекта. Он начинает действовать сразу после добавления.</p>
+      <form class="panel" id="custom-form" novalidate>
+        <label class="field"><span>Что ловим</span>
+          <input type="text" name="why" maxlength="200" required placeholder="Например: изменения в таблице платежей">
+        </label>
+        <label class="field"><span>Шаблон</span>
+          <input type="text" name="pattern" maxlength="500" required spellcheck="false" placeholder="Например: DELETE FROM payments">
+        </label>
+        <label class="check"><input type="checkbox" name="regex">
+          <span>Это регулярное выражение <span class="muted small">(иначе ищем как обычный текст, без учёта регистра)</span></span>
+        </label>
+        <fieldset>
+          <legend>Что делать, если сработал</legend>
+          <label class="check"><input type="radio" name="severity" value="MEDIUM">
+            <span><span class="badge MEDIUM">средний</span> пропустить и записать в журнал</span></label>
+          <label class="check"><input type="radio" name="severity" value="HIGH" checked>
+            <span><span class="badge HIGH">высокий</span> спросить человека; можно «Разрешать всегда»</span></label>
+          <label class="check"><input type="radio" name="severity" value="CRITICAL">
+            <span><span class="badge CRITICAL">критический</span> спрашивать человека каждый раз</span></label>
+        </fieldset>
+        <label class="field"><span>Как безопаснее <span class="muted small">(необязательно, увидите в карточке)</span></span>
+          <input type="text" name="fix" maxlength="300" placeholder="Например: сначала сделайте выгрузку таблицы">
+        </label>
+        <label class="check"><input type="checkbox" name="files">
+          <span>Проверять и содержимое записываемых файлов <span class="muted small">(по умолчанию — только команды и вызовы инструментов)</span></span>
+        </label>
+        <label class="field"><span>Проверить на примере</span>
+          <input type="text" name="sample" spellcheck="false" placeholder="Вставьте команду, которую шаблон должен поймать">
+        </label>
+        <p class="result info" id="test-result" aria-live="polite"></p>
+        <div><button type="submit" class="btn primary">Добавить шаблон</button></div>
+      </form>
+      <h2>Ваши шаблоны</h2>
+      <div id="custom-list"></div>
+    </div>
+  </section>
+
+  <section role="tabpanel" id="panel-check" aria-labelledby="tab-check" hidden>
+    <div class="pane">
+      <label class="field"><span>Команда, которую мог бы выполнить агент</span>
+        <textarea id="cmd" rows="3" spellcheck="false" placeholder='psql -c "DELETE FROM users;"'></textarea>
+      </label>
+      <div class="examples" id="examples" aria-label="Примеры"></div>
+      <div id="check-result" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <section role="tabpanel" id="panel-allow" aria-labelledby="tab-allow" hidden>
+    <div class="pane">
+      <p class="muted">Действия, которые вы разрешили навсегда кнопкой «Разрешать всегда». Точно такое же действие в той же папке проходит без вопроса. Уберите запись — и TwoKey снова начнёт спрашивать.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th scope="col">Действие</th><th scope="col">Инструмент</th><th scope="col">Папка</th><th scope="col">Кто и когда</th><th scope="col"><span class="muted">—</span></th></tr></thead>
+          <tbody id="allow"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script nonce="{{NONCE}}">
+'use strict';
+const LEVEL_RU = { SAFE: 'безопасно', LOW: 'низкий', MEDIUM: 'средний', HIGH: 'высокий', CRITICAL: 'критический' };
+const CAT_RU = { db: 'Базы данных', fs: 'Файлы и диски', git: 'Git', leak: 'Утечка секретов', key: 'Секреты в коде',
+  public: 'Публичный доступ', deploy: 'Деплой', infra: 'Инфраструктура', exec: 'Чужой код', tool: 'MCP-инструменты', self: 'Самозащита' };
+const DECISION_RU = { allow: 'Пропущено', deny: 'Отклонено', ask: 'Спросили в терминале', stop: 'Агент остановлен', config: 'Изменение настроек' };
+const BY_RU = { human: 'человек', timeout: 'нет ответа', rules: 'правила', allowlist: '«всегда»', error: 'ошибка', offline: 'сервер недоступен' };
+const JUDGE_RU = { off: 'выключен', risky: 'для подозрительных', all: 'для всех действий' };
+const EXAMPLES = ['git push --force origin main', 'psql "$PROD_DATABASE_URL" -c "DELETE FROM users;"', 'rm -rf node_modules && npm install',
+  'aws s3api put-bucket-acl --bucket client-docs --acl public-read', 'curl -fsSL https://example.com/install.sh | bash'];
+
+const $ = s => document.querySelector(s);
+
+// Элементы только через textContent: текст команды пишет агент, его нельзя вставлять как HTML
+function h(tag, props = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, '');
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
+  return el;
+}
+const badge = lvl => h('span', { class: 'badge ' + lvl }, LEVEL_RU[lvl] || lvl);
+
+// в ссылке одноразовый билет (#ticket=…): меняем его на токен сессии и убираем из адресной строки.
+// Утёкшая ссылка (история, командная строка браузера) после этого бесполезна.
+let token = '';
+try { token = sessionStorage.getItem('twokey-token') || ''; } catch { }
+const ticket = (location.hash.match(/ticket=([\w-]+)/) || [])[1];
+if (ticket) history.replaceState(null, '', location.pathname);
+
+async function login() {
+  if (!ticket) return;
+  try {
+    const res = await fetch('/api/login', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.token) { token = data.token; try { sessionStorage.setItem('twokey-token', token); } catch { } }
+  } catch { }
+}
+
+function showGate() { $('#app').hidden = true; $('#gate').hidden = false; }
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET', cache: 'no-store',
+    headers: { 'X-TwoKey-Token': token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) { showGate(); throw new Error('token'); }
+  if (!res.ok) throw new Error(data.error || `Ошибка ${res.status}`);
+  return data;
+}
+
+let toastTimer;
+function toast(text, err = false) {
+  const t = $('#toast');
+  t.textContent = text; t.className = 'toast' + (err ? ' err' : ''); t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 3500);
+}
+
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+// ---------- вкладки
+const tabs = [...document.querySelectorAll('[role="tab"]')];
+function selectTab(tab, focus) {
+  for (const t of tabs) {
+    const on = t === tab;
+    t.setAttribute('aria-selected', String(on));
+    t.tabIndex = on ? 0 : -1;
+    document.getElementById(t.dataset.panel).hidden = !on;
+  }
+  if (focus) tab.focus();
+  try { localStorage.setItem('twokey-tab', tab.id); } catch { }
+}
+tabs.forEach(t => t.addEventListener('click', () => selectTab(t)));
+$('.tablist').addEventListener('keydown', e => {
+  const i = tabs.indexOf(document.activeElement);
+  const to = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+  if (i < 0 || to === undefined) return;
+  e.preventDefault();
+  selectTab(tabs[(to + tabs.length) % tabs.length], true);
+});
+try { const saved = document.getElementById(localStorage.getItem('twokey-tab') || ''); if (saved && tabs.includes(saved)) selectTab(saved); } catch { }
+
+// ---------- состояние
+const last = {};
+function changed(key, value) { const s = JSON.stringify(value); if (last[key] === s) return false; last[key] = s; return true; }
+function setText(el, text) { if (el.textContent !== text) el.textContent = text; }
+function chip(id, text, state) { const el = $(id); setText(el, text); el.className = 'chip' + (state ? ' ' + state : ''); }
+
+async function refresh() {
+  let s;
+  try { s = await api('/api/state'); }
+  catch (e) { if (e.message !== 'token') chip('#chip-conn', 'нет связи с сервером', 'bad'); return; }
+  chip('#chip-conn', 'на связи', 'on');
+  chip('#chip-tg', s.telegram ? 'Telegram подключён' : 'Telegram не настроен — решения приходят сюда', s.telegram ? 'on' : 'warn');
+  chip('#chip-judge', 'AI-судья: ' + (JUDGE_RU[s.judge] || s.judge), s.judge === 'off' ? '' : 'on');
+  const n = s.pending.length;
+  const count = $('#count'); count.hidden = !n; setText(count, String(n));
+  $('#tab-decisions').setAttribute('aria-label', n ? `Решения: ждут ${n}` : 'Решения');
+  document.title = (n ? `(${n}) ` : '') + 'TwoKey — панель';
+  renderPending(s.pending);
+  if (changed('audit', s.audit)) renderAudit(s.audit);
+  if (changed('allow', s.allow)) renderAllow(s.allow);
+  if (changed('rules', [s.rules, s.custom, s.disabled])) { renderRules(s.rules, s.disabled); renderCustom(s.custom, s.disabled); }
+}
+
+// ---------- решения
+const timer = sec => `Осталось ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+
+function renderPending(list) {
+  const box = $('#pending');
+  const ids = list.map(p => p.rid).join();
+  if (box.dataset.ids === ids) {
+    for (const p of list) { const t = box.querySelector(`[data-timer="${p.rid}"]`); if (t) setText(t, timer(p.left)); }
+    return;
+  }
+  const drafts = {};
+  box.querySelectorAll('textarea[data-rid]').forEach(t => { drafts[t.dataset.rid] = t.value; });
+  box.dataset.ids = ids;
+  box.replaceChildren();
+  if (!list.length) {
+    box.append(h('p', { class: 'empty' }, 'Сейчас агент ничего опасного не просит. Когда попросит — карточка появится здесь (и в Telegram, если он подключён).'));
+    return;
+  }
+  for (const p of list) box.append(card(p, drafts[p.rid] || ''));
+}
+
+function card(p, draft) {
+  const ta = h('textarea', { rows: 2, id: 'own-' + p.rid, 'data-rid': p.rid, placeholder: 'Например: сначала сделай бэкап и удали только тестовых пользователей' });
+  ta.value = draft;
+  const own = h('div', { class: 'own' },
+    h('label', { for: ta.id }, 'Что агенту сделать вместо этого?'), ta,
+    h('div', {}, h('button', { type: 'button', class: 'btn primary', onclick: () => decide(p.rid, 's', ta.value) }, 'Отправить агенту')));
+  own.hidden = !draft;
+  const buttons = [['a', 'Пропустить', 'btn ok'], ['d', 'Отклонить', 'btn danger'], ['s', 'Своё решение', 'btn'], ['m', 'Разберусь вручную', 'btn']];
+  if (p.can_always) buttons.push(['w', 'Разрешать всегда', 'btn ghost']);
+  const press = code => { if (code === 's') { own.hidden = false; ta.focus(); } else decide(p.rid, code); };
+  return h('article', { class: 'card sev-' + p.severity.toLowerCase(), 'aria-label': 'Запрос агента, риск ' + LEVEL_RU[p.severity] },
+    h('div', { class: 'card-head' }, badge(p.severity), h('span', { class: 'muted' }, `${p.agent} · ${p.tool}`),
+      h('span', { class: 'timer', 'data-timer': p.rid }, timer(p.left))),
+    p.cwd ? h('p', { class: 'muted small' }, 'Папка: ', h('code', {}, p.cwd)) : null,
+    h('pre', { class: 'action' }, p.action),
+    p.ai ? h('p', { class: 'ai' }, 'Мнение AI-судьи (совет): ', p.ai) : null,
+    h('h3', {}, 'Почему опасно'), h('ul', {}, p.findings.map(f => h('li', {}, f))),
+    p.fixes.length ? [h('h3', {}, 'Как безопаснее'), h('ul', {}, p.fixes.map(f => h('li', {}, f)))] : null,
+    h('div', { class: 'actions' }, buttons.map(([code, label, cls]) => h('button', { type: 'button', class: cls, onclick: () => press(code) }, label))),
+    own);
+}
+
+async function decide(rid, choice, text = '') {
+  if (choice === 's' && !text.trim()) { toast('Напишите, что агенту сделать вместо этого', true); return; }
+  try { await api('/api/decide', { rid, choice, text }); toast('Решение отправлено агенту'); }
+  catch (e) { if (e.message !== 'token') toast(e.message, true); }
+  refresh();
+}
+
+function when(ts) { return ts ? `${ts.slice(8, 10)}.${ts.slice(5, 7)} ${ts.slice(11, 16)}` : ''; }
+
+function renderAudit(list) {
+  const body = $('#audit');
+  body.replaceChildren();
+  if (!list.length) { body.append(h('tr', {}, h('td', { colspan: 5, class: 'muted' }, 'Пока пусто: здесь появятся рискованные действия агента и решения по ним.'))); return; }
+  for (const r of list) {
+    const action = String(r.action || '');
+    const decision = (DECISION_RU[r.decision] || r.decision || '') + (r.by && r.decision !== 'config' ? ` (${BY_RU[r.by] || r.by})` : '');
+    body.append(h('tr', {},
+      h('td', { class: 'when' }, when(r.ts)),
+      h('td', {}, r.decision === 'config' ? h('span', { class: 'badge config' }, 'настройки') : r.severity ? badge(r.severity) : ''),
+      h('td', {}, h('code', {}, r.tool || '')),
+      h('td', { class: 'act', title: action }, action.length > 160 ? action.slice(0, 160) + '…' : action),
+      h('td', {}, decision, r.choice && r.choice !== decision ? h('div', { class: 'muted small' }, r.choice) : null)));
+  }
+}
+
+function renderAllow(list) {
+  const body = $('#allow');
+  body.replaceChildren();
+  if (!list.length) { body.append(h('tr', {}, h('td', { colspan: 5, class: 'muted' }, 'Пока ничего не разрешено навсегда.'))); return; }
+  for (const a of list) {
+    body.append(h('tr', {},
+      h('td', { class: 'act' }, a.action),
+      h('td', {}, h('code', {}, a.tool)),
+      h('td', { class: 'act' }, a.cwd || '—'),
+      h('td', { class: 'when' }, `${a.who || ''} ${a.ts || ''}`),
+      h('td', {}, h('button', { type: 'button', class: 'btn', onclick: () => forget(a.id) }, 'Убрать'))));
+  }
+}
+
+async function forget(id) {
+  try { await api('/api/allow/delete', { id }); toast('Убрано: TwoKey снова будет спрашивать'); }
+  catch (e) { if (e.message !== 'token') toast(e.message, true); }
+  refresh();
+}
+
+// ---------- правила
+const CAT_ORDER = ['db', 'fs', 'git', 'leak', 'key', 'public', 'deploy', 'infra', 'exec', 'tool', 'self'];
+
+function renderRules(rules, disabled) {
+  const box = $('#rules');
+  box.replaceChildren();
+  const off = new Set(disabled);
+  const cats = [...new Set([...CAT_ORDER, ...rules.map(r => r.cat)])];
+  for (const cat of cats) {
+    const items = rules.filter(r => r.cat === cat);
+    if (!items.length) continue;
+    box.append(h('div', { class: 'group' }, h('h3', {}, CAT_RU[cat] || cat), items.map(r => ruleRow(r, off.has(r.id)))));
+  }
+  const on = rules.filter(r => !off.has(r.id)).length;
+  setText($('#rules-summary'), `Включено ${on} из ${rules.length} встроенных правил`);
+  applyFilter();
+}
+
+function ruleRow(r, isOff) {
+  const id = 'rule-' + r.id;
+  const input = h('input', { type: 'checkbox', role: 'switch', id, 'aria-describedby': id + '-fix' });
+  input.checked = !isOff;
+  input.disabled = r.locked;
+  input.addEventListener('change', () => toggle(r.id, input));
+  return h('div', { class: 'rule' + (isOff ? ' off' : ''), 'data-search': `${r.why} ${r.id} ${r.fix} ${CAT_RU[r.cat] || ''}`.toLowerCase() },
+    h('span', { class: 'switch' }, input, h('span', { class: 'track', 'aria-hidden': 'true' })),
+    h('div', { class: 'rule-body' },
+      h('label', { for: id, class: 'rule-title' }, r.why),
+      h('p', { class: 'muted small', id: id + '-fix' }, r.locked ? 'Нельзя отключить: иначе агент сможет выключить TwoKey. ' : '', 'Как безопаснее: ', r.fix)),
+    h('div', { class: 'rule-meta' }, r.levels.map(badge), h('code', { class: 'muted small' }, r.id)));
+}
+
+async function toggle(id, input) {
+  input.disabled = true;
+  try { await api('/api/rules/toggle', { id, enabled: input.checked }); toast(input.checked ? 'Правило включено' : 'Правило отключено'); }
+  catch (e) { input.checked = !input.checked; if (e.message !== 'token') toast(e.message, true); }
+  input.disabled = false;
+  refresh();
+}
+
+function applyFilter() {
+  const q = $('#rule-filter').value.trim().toLowerCase();
+  for (const row of document.querySelectorAll('#rules .rule')) row.hidden = !!q && !row.dataset.search.includes(q);
+  for (const g of document.querySelectorAll('#rules .group')) g.hidden = ![...g.querySelectorAll('.rule')].some(r => !r.hidden);
+}
+$('#rule-filter').addEventListener('input', applyFilter);
+
+// ---------- свои шаблоны
+function renderCustom(list, disabled) {
+  const box = $('#custom-list');
+  box.replaceChildren();
+  if (!list.length) { box.append(h('p', { class: 'empty' }, 'Своих шаблонов пока нет.')); return; }
+  const off = new Set(disabled);
+  for (const c of list) {
+    const id = 'rule-' + c.id;
+    const input = h('input', { type: 'checkbox', role: 'switch', id });
+    input.checked = !off.has(c.id);
+    input.addEventListener('change', () => toggle(c.id, input));
+    box.append(h('div', { class: 'rule' + (off.has(c.id) ? ' off' : '') },
+      h('span', { class: 'switch' }, input, h('span', { class: 'track', 'aria-hidden': 'true' })),
+      h('div', { class: 'rule-body' },
+        h('label', { for: id, class: 'rule-title' }, c.why),
+        h('p', { class: 'small' }, h('code', {}, c.pattern), h('span', { class: 'muted' }, c.regex ? ' · регулярное выражение' : ' · обычный текст', c.files ? ' · и в файлах' : '')),
+        c.fix ? h('p', { class: 'muted small' }, 'Как безопаснее: ', c.fix) : null),
+      h('div', { class: 'rule-meta' }, badge(c.severity),
+        h('button', { type: 'button', class: 'btn danger', onclick: () => removeCustom(c) }, 'Удалить'))));
+  }
+}
+
+async function removeCustom(c) {
+  if (!confirm(`Удалить шаблон «${c.why}»?`)) return;
+  try { await api('/api/rules/delete', { id: c.id }); toast('Шаблон удалён'); }
+  catch (e) { if (e.message !== 'token') toast(e.message, true); }
+  refresh();
+}
+
+const form = $('#custom-form');
+const testResult = $('#test-result');
+function setResult(text, kind) { testResult.textContent = text; testResult.className = 'result ' + kind; }
+const testPattern = debounce(async () => {
+  const f = form.elements;
+  if (!f.pattern.value.trim()) { setResult('', 'info'); return; }
+  try {
+    const r = await api('/api/test-pattern', { pattern: f.pattern.value, regex: f.regex.checked, sample: f.sample.value });
+    if (r.error) setResult(r.error, 'bad');
+    else if (!f.sample.value) setResult('Шаблон в порядке. Вставьте пример, чтобы проверить, что он сработает.', 'info');
+    else if (r.match != null) setResult(`Сработает: найдёт «${r.match}»`, 'good');
+    else setResult('На этом примере не сработает', 'bad');
+  } catch (e) { if (e.message !== 'token') setResult(e.message, 'bad'); }
+}, 250);
+for (const name of ['pattern', 'regex', 'sample']) form.elements[name].addEventListener('input', testPattern);
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = form.elements;
+  if (!f.why.value.trim() || !f.pattern.value.trim()) { setResult('Заполните «Что ловим» и «Шаблон»', 'bad'); (f.why.value.trim() ? f.pattern : f.why).focus(); return; }
+  try {
+    await api('/api/rules/custom', { why: f.why.value, pattern: f.pattern.value, regex: f.regex.checked, severity: f.severity.value, fix: f.fix.value, files: f.files.checked });
+    form.reset(); setResult('', 'info');
+    toast('Шаблон добавлен и уже действует');
+  } catch (err) { if (err.message !== 'token') setResult(err.message, 'bad'); }
+  refresh();
+});
+
+// ---------- проверка команды
+const cmd = $('#cmd');
+for (const ex of EXAMPLES) $('#examples').append(h('button', { type: 'button', class: 'btn ghost', onclick: () => { cmd.value = ex; check(); } }, ex));
+const check = debounce(async () => {
+  const box = $('#check-result');
+  if (!cmd.value.trim()) { box.replaceChildren(); return; }
+  try {
+    const r = await api('/api/check', { command: cmd.value });
+    const verdict = r.ask ? 'спросит человека' : r.severity === 'MEDIUM' ? 'пропустит и запишет в журнал' : 'пропустит без вопроса';
+    box.replaceChildren(...[  // replaceChildren не разворачивает массивы — разворачиваем сами
+      h('p', { class: 'verdict' }, badge(r.severity), 'Итог: ' + verdict),
+      r.findings.map(f => h('div', { class: 'finding' },
+        h('div', {}, badge(f.severity), ' ', f.why, f.hit ? [' — ', h('span', { class: 'hit' }, f.hit)] : null),
+        h('div', { class: 'muted small' }, 'Как безопаснее: ', f.fix))),
+      r.findings.length ? null : h('p', { class: 'muted' }, 'Ни одно правило не сработало.'),
+    ].flat().filter(Boolean));
+  } catch (e) { if (e.message !== 'token') box.replaceChildren(h('p', { class: 'result bad' }, e.message)); }
+}, 200);
+cmd.addEventListener('input', check);
+
+// ---------- старт
+login().then(() => {
+  if (!token) { showGate(); return; }
+  refresh();
+  setInterval(refresh, 2000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+});
+</script>
+</body>
+</html>

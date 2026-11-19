@@ -15,7 +15,7 @@
 
 Только стандартная библиотека. Для AI-судьи: pip install anthropic.
 """
-import hashlib, html, json, os, re, secrets, sys, threading, time, urllib.error, urllib.request
+import hashlib, hmac, html, json, os, re, secrets, sys, threading, time, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +41,7 @@ JUDGE = os.environ.get("GUARDIAN_JUDGE", "risky")  # off | risky | all
 MODEL = os.environ.get("GUARDIAN_MODEL", "claude-opus-5-5")
 AUDIT = os.environ.get("GUARDIAN_AUDIT", os.path.join(HERE, "audit.jsonl"))
 ALLOW_FILE = os.path.join(HERE, "allow.json")  # «Разрешать всегда»; папка TwoKey защищена от записи агентом
+RULES_FILE = os.path.join(HERE, "rules.json")  # свои шаблоны и отключённые встроенные правила
 
 SAFE, LOW, MEDIUM, HIGH, CRITICAL = range(5)
 LEVELS = ["SAFE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -54,6 +55,18 @@ SAFE_DIRS = (r"(?:\.[\\/])?(?:node_modules|dist|build|out|\.next|\.nuxt|__pycach
              r"|\.mypy_cache|\.ruff_cache|\.cache|coverage|target|tmp|\.turbo|\.parcel-cache|\.venv|venv|\*\.egg-info)[\\/]?")
 SECRET_PATH = r"(\.env\b|id_rsa|id_ed25519|\.pem\b|\.aws/|\.ssh/|\.npmrc|\.pypirc|\.netrc|credentials)"
 GIT_PUSH = r"\bgit\s+(?:-[Cc]\s+\S+\s+)*push\b"
+
+
+def _path_rx(path):
+    """Путь в любом написании: C:\\x\\y, C:/x/y, /c/x/y (Git Bash) — чтобы самозащита не зависела от имени папки."""
+    parts = [p for p in re.split(r"[\\/]+", path) if p]
+    head = ""
+    if parts and re.fullmatch(r"[A-Za-z]:", parts[0]):
+        head, parts = rf"(?:{re.escape(parts[0])}|/{parts[0][0]})", parts[1:]
+    return head + "".join(r"[\\/]+" + re.escape(p) for p in parts)
+
+
+HERE_RX = _path_rx(HERE)
 END = r"(?=\s|$|;|&|\||\"|')"
 RULES = [
     # --- базы данных
@@ -196,9 +209,11 @@ RULES = [
     # --- самозащита: агент пытается отключить контроль
     ("self", CRITICAL, "self",
      r"\b(rm|del|mv|cp|kill|pkill|taskkill|Stop-Process|sed\s+-i|tee|chmod|Remove-Item|Set-Content|Out-File|echo"
-     r"|python3?|node|perl|ruby|pwsh|powershell|printf|cat|cd)\b[^;\n]*(guardian\.py|twokey)|>>?\s*\S*twokey"
+     r"|python3?|node|perl|ruby|pwsh|powershell|printf|cat|cd)\b[^;\n]*(guardian\.py|twokey|" + HERE_RX + r")"
+     r"|>>?\s*\S*(twokey|" + HERE_RX + r")"
      r"|\b(taskkill|Stop-Process|pkill|killall)\b[^;\n]*python|(?=[^\n]*\.claude\b)[^\n]*\bsettings(\.local)?\.json\b"
-     r"|\.claude[\\/]+(settings|hooks)|--dangerously-skip-permissions|\bdisableAllHooks\b",
+     r"|\.claude[\\/]+(settings|hooks)|--dangerously-skip-permissions|\bdisableAllHooks\b"
+     rf"|:{PORT}(?!\d)",  # порт TwoKey в любом виде (localhost, 127.1, 2130706433, [::1]) — панель только для человека
      "Попытка изменить или отключить защиту агента", "Настройки защиты меняет только человек"),
     # --- секреты (проверяются и в записываемых файлах; по ним же маскируем)
     ("key-aws", HIGH, "key", r"\b(AKIA|ASIA)(?![0-9A-Z]{9}EXAMPLE\b)[0-9A-Z]{16}\b", "В коде ключ доступа AWS", "Храните ключи в .env / secret manager"),
@@ -224,8 +239,11 @@ RULES = [
      r"(?:^|_|-)(send|publish|post|tweet|email|transfer|pay|payment|payout|charge|refund|deploy|merge|invite|share)(?:_|-|$)",
      "Действие с внешним эффектом (отправка, платёж, публикация)", "Проверьте получателя и содержимое"),
 ]
-RULES = [(i, s, c, re.compile(rx, re.I | re.M), why, fix) for i, s, c, rx, why, fix in RULES]
-KEY_RX = [r[3] for r in RULES if r[2] == "key"]
+BUILTIN = [(i, s, c, re.compile(rx, re.I | re.M), why, fix) for i, s, c, rx, why, fix in RULES]
+RULES = list(BUILTIN)  # действующие правила: встроенные минус отключённые плюс свои (apply_config)
+KEY_RX = [r[3] for r in BUILTIN if r[2] == "key"]  # маскируем секреты всегда, даже если правило отключено
+LOCKED = {"self"}  # самозащиту отключить нельзя
+CONFIG = {"disabled": [], "custom": []}
 MASK_RX = [  # только для маскировки, вдобавок к KEY_RX
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)", re.S), "-----BEGIN…[ключ скрыт]"),
     (re.compile(r"(?i)(\b\w*(?:passw(?:or)?d|secret|token|api[_-]?key)\w*[\"']?\s*[:=]\s*[\"']?)[^\s\"',;]{6,}"), r"\1…[скрыто]"),
@@ -237,6 +255,63 @@ MAX_SCAN = 16000  # ponytail: регэкспы вида [^;\n]* квадрати
 ENV_FILE = re.compile(r"(^|[\\/])(\.env(?!\.(example|sample|template|dist)$)(\.[\w.-]+)?|\.dev\.vars|secrets?\.(ya?ml|json|toml))$", re.I)
 READ_ONLY = {"Read", "Glob", "Grep", "LS", "TodoWrite", "NotebookRead"}
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+
+
+# ------------------------------------------------- свои шаблоны и отключение ---
+def _load_config():
+    try:
+        with open(RULES_FILE, encoding="utf-8-sig") as f:
+            cfg = json.load(f)
+        return {"disabled": [str(x) for x in cfg.get("disabled", [])],
+                "custom": [c for c in cfg.get("custom", []) if isinstance(c, dict)]}
+    except (OSError, ValueError, AttributeError):
+        return {"disabled": [], "custom": []}
+
+
+NESTED_QUANT = re.compile(r"\((?:[^()\\]|\\.)*[+*{](?:[^()\\]|\\.)*\)\s*[+*{]")  # (a+)+, (\w+\s?)* …
+
+
+def compile_custom(c):
+    """Свой шаблон → правило. Плохой шаблон — ValueError с понятным текстом."""
+    text = str(c.get("pattern", ""))
+    if not text.strip() or len(text) > 500:
+        raise ValueError("Шаблон пустой или длиннее 500 символов")
+    if c.get("severity") not in LEVELS[MEDIUM:]:
+        raise ValueError("Уровень: MEDIUM, HIGH или CRITICAL")
+    if c.get("regex") and NESTED_QUANT.search(text):
+        raise ValueError("Вложенные повторения вида (a+)+ могут надолго «подвесить» проверку — упростите выражение")
+    try:  # ponytail: эвристика выше ловит классику ReDoS; остальное ограничивает только длина текста (MAX_SCAN)
+        rx = re.compile(text if c.get("regex") else re.escape(text), re.I | re.M)
+    except re.error as e:
+        raise ValueError(f"Ошибка в регулярном выражении: {e}") from None
+    return (str(c.get("id", "")), LEVELS.index(c["severity"]), "custom-files" if c.get("files") else "custom", rx,
+            str(c.get("why") or "Свой шаблон"), str(c.get("fix") or "Проверьте действие вручную"))
+
+
+def apply_config(cfg):
+    """Действующие правила = встроенные минус отключённые плюс свои шаблоны."""
+    global RULES, CONFIG
+    off = set(cfg["disabled"]) - LOCKED
+    custom = []
+    for c in cfg["custom"]:
+        try:
+            custom.append(compile_custom(c))
+        except ValueError as e:
+            log(f"Свой шаблон {c.get('id')} пропущен: {e}")
+    RULES = [r for r in BUILTIN if r[0] not in off] + [r for r in custom if r[0] not in off]
+    CONFIG = cfg
+
+
+def update_config(change):
+    """Изменить rules.json атомарно и сразу применить (сервер — сразу, хук — со следующего действия)."""
+    with LOCK:
+        cfg = json.loads(json.dumps(CONFIG))
+        change(cfg)
+        tmp = RULES_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, RULES_FILE)
+        apply_config(cfg)
 
 # Строки в кавычках внутри поиска, коммита или документации — данные, а не действия.
 NO_SUBST = r"(?:'[^']*'|\"[^\"$`]*\")"  # "$(...)" и `...` не трогаем: они исполняются
@@ -290,6 +365,17 @@ def shown(inp):
     return json.dumps(_mask_tree(inp), ensure_ascii=False)
 
 
+def _leaves(x):
+    if isinstance(x, dict):
+        for v in x.values():
+            yield from _leaves(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _leaves(v)
+    elif isinstance(x, str):
+        yield x
+
+
 def self_target(path):
     """Путь — настройки агента или сам TwoKey? `file::$DATA` и хвостовые точки в NTFS — тот же файл."""
     p = re.sub(r"(::\$\w+|:[\w$]+)$", "", path.strip()).rstrip(". ")
@@ -328,20 +414,24 @@ def evaluate(tool, inp):
     script = writes and re.search(r"\.(sh|bash|ps1|bat|cmd|py)$", path, re.I)
     if writes and self_target(path):
         add("self", CRITICAL, "Агент правит настройки собственной защиты", "Настройки защиты меняет только человек", path)
+    elif not writes and tool != "Bash":  # MCP-инструменты записи (write_file, move…) — по любому пути в параметрах
+        hit = next((s for s in _leaves(inp) if len(s) < 500 and self_target(s)), None)
+        if hit:
+            add("self", CRITICAL, "Инструмент агента трогает файлы TwoKey", "Настройки защиты меняет только человек", hit)
     tool_words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", tool)  # deleteDatabase → delete_Database
     for rid, sev, cat, rx, why, fix in RULES:
         if rid in seen:
             continue
         if cat == "tool":
             hay = tool_words if tool.startswith("mcp__") else ""
-        elif writes and cat != "key" and not script:
+        elif writes and cat not in ("key", "custom-files") and not script:
             continue  # написать файл с "DROP TABLE" ≠ выполнить его
         else:
             hay = text
         m = rx.search(hay)
         if not m:
             continue
-        if writes and cat != "key":
+        if writes and cat not in ("key", "custom-files"):
             sev = min(sev, MEDIUM)  # опасный скрипт: в журнал и AI-судье, человек — когда его запустят
         if cat == "key":
             if writes and ENV_FILE.search(path):
@@ -540,7 +630,12 @@ def resolve(rid, choice, who="", text=""):
 def ask_human(req, sev, found, ai, deadline):
     rid = secrets.token_hex(4)
     p = {"event": threading.Event(), "decision": None, "text": render(req, sev, found, ai),
-         "excerpt": head_tail(shown(req.get("input") or {}), 80)}
+         "excerpt": head_tail(shown(req.get("input") or {}), 80), "deadline": deadline,
+         "card": {"tool": str(req.get("tool", "?")), "agent": str(req.get("agent", "?")), "cwd": str(req.get("cwd") or ""),
+                  "action": head_tail(shown(req.get("input") or {})), "severity": LEVELS[sev], "ru": RU[sev],
+                  "findings": [f["why"] + (f" — {f['hit']}" if f.get("hit") else "") for f in found],
+                  "fixes": list(dict.fromkeys([f["fix"] for f in found] + list((ai or {}).get("alternatives", []))))[:5],
+                  "ai": (ai or {}).get("summary") or "", "can_always": sev == HIGH}}
     rows = [[btn("✅ Пропустить", "a", rid), btn("❌ Отклонить", "d", rid)],
             [btn("✍️ Своё решение", "s", rid), btn("🛠 Разберусь вручную", "m", rid)]]
     if sev == HIGH:  # критичное навсегда не разрешаем — только по одному разу
@@ -549,14 +644,17 @@ def ask_human(req, sev, found, ai, deadline):
         rows.append([btn("♾ Разрешать всегда", "w", rid)])
     with LOCK:
         PENDING[rid] = p
-    try:
-        msg = tg("sendMessage", chat_id=TG_CHAT_ID, text=p["text"], parse_mode="HTML", reply_markup={"inline_keyboard": rows})
-        p["msg_id"] = msg["message_id"]
-    except Exception as e:
-        with LOCK:
-            PENDING.pop(rid, None)
-        return {"decision": "deny", "by": "error",
-                "reason": f"TwoKey: не удалось связаться с Telegram ({e}). Действие заблокировано (fail-closed)."}
+    if TG_TOKEN and TG_CHAT_ID:  # без Telegram решение ждём только в панели (decide() проверил, что она открыта)
+        try:
+            msg = tg("sendMessage", chat_id=TG_CHAT_ID, text=p["text"], parse_mode="HTML", reply_markup={"inline_keyboard": rows})
+            p["msg_id"] = msg["message_id"]
+        except Exception as e:
+            if not panel_live():
+                with LOCK:
+                    PENDING.pop(rid, None)
+                return {"decision": "deny", "by": "error",
+                        "reason": f"TwoKey: не удалось связаться с Telegram ({e}). Действие заблокировано (fail-closed)."}
+            log(f"Telegram недоступен ({e}) — ждём решения в панели")
     if not p["event"].wait(max(0.0, deadline - time.monotonic())):  # отсчёт от прихода запроса, а не после судьи
         resolve(rid, "t")
     with LOCK:
@@ -600,9 +698,14 @@ def handle_update(u):
         cmd = cmd.split("@")[0]  # в группах команда приходит как /forget@имя_бота
         if cmd == "/start":
             tg_safe("sendMessage", chat_id=chat, text=f"TwoKey на связи. chat_id этого чата: {chat}\n"
-                                                      "/always — что разрешено навсегда, /forget <id> — отменить")
+                                                      "/panel — ссылка на панель, /always — что разрешено навсегда, "
+                                                      "/forget <id> — отменить")
             return
         if not text or not authorized(chat, user):
+            return
+        if cmd == "/panel":
+            tg_safe("sendMessage", chat_id=chat, text="Одноразовая ссылка на панель — откройте на компьютере, где запущен "
+                                                      f"TwoKey:\n{panel_link()}" if UI_TOKEN else "Панель работает, только когда запущен serve.")
             return
         if cmd == "/always":
             with LOCK:
@@ -656,7 +759,7 @@ def decide(req):
     sev, found, ai = assess(tool, inp)
     if sev < HIGH:
         res = {"decision": "allow", "by": "rules", "reason": ""}
-    elif not (TG_TOKEN and TG_CHAT_ID):
+    elif not (TG_TOKEN and TG_CHAT_ID) and not panel_live():
         res = {"decision": "ask", "by": "rules",
                "reason": "TwoKey: опасное действие — " + "; ".join(f["why"] for f in found) + ". Подтвердите вручную."}
     else:
@@ -675,31 +778,243 @@ def audit(req, res):
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+# --------------------------------------------------------------- панель ---
+UI_TOKEN = ""  # токен сессии панели: знают только память сервера и вкладка браузера
+UI_TICKETS = set()  # одноразовые билеты из ссылок: браузер меняет билет на токен, и ссылка перестаёт работать
+LAST_PANEL_POLL = -1e9  # когда открытая панель последний раз спрашивала состояние
+
+
+def panel_link():
+    """Одноразовая ссылка на панель. Утечёт (история, командная строка браузера) — уже бесполезна."""
+    ticket = secrets.token_urlsafe(18)
+    with LOCK:
+        UI_TICKETS.add(ticket)
+    return f"http://127.0.0.1:{PORT}/#ticket={ticket}"
+
+
+def panel_live():
+    """Панель открыта прямо сейчас — значит, решения можно ждать в ней."""
+    return time.monotonic() - LAST_PANEL_POLL < 15
+
+
+def audit_event(text):
+    rec = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "agent": "панель", "tool": "настройки", "action": text,
+           "decision": "config", "by": "human"}
+    with LOCK, open(AUDIT, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def audit_tail(n=60):
+    """Последние записи журнала, новые сверху. Читаем только хвост файла."""
+    try:
+        with open(AUDIT, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            lines = f.read().decode("utf-8", "replace").splitlines()[-n:]
+    except OSError:
+        return []
+    out = []
+    for line in reversed(lines):
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            pass  # первая строка окна могла обрезаться
+    return out
+
+
+def rule_groups():
+    groups = {}
+    for rid, sev, cat, rx, why, fix in BUILTIN:
+        g = groups.setdefault(rid, {"id": rid, "cat": cat, "why": why, "fix": fix, "levels": [], "locked": rid in LOCKED})
+        g["levels"].append(LEVELS[sev])
+    return list(groups.values())
+
+
+def panel_state():
+    global LAST_PANEL_POLL
+    LAST_PANEL_POLL = now = time.monotonic()
+    with LOCK:
+        pending = [{"rid": r, "left": max(0, int(p["deadline"] - now)), **p["card"]}
+                   for r, p in PENDING.items() if not p["decision"] and "card" in p]
+        allow = [{"id": k, **v} for k, v in ALLOW.items()]
+        cfg = json.loads(json.dumps(CONFIG))
+    return {"telegram": bool(TG_TOKEN and TG_CHAT_ID), "judge": JUDGE, "timeout": TIMEOUT, "pending": pending,
+            "allow": allow, "audit": audit_tail(), "rules": rule_groups(), "custom": cfg["custom"], "disabled": cfg["disabled"]}
+
+
+def api_check(b):
+    sev, found = evaluate("Bash", {"command": str(b.get("command", ""))})
+    return {"severity": LEVELS[sev], "ru": RU[sev], "ask": sev >= HIGH,
+            "findings": [{"id": f["id"], "severity": LEVELS[f["severity"]], "why": f["why"], "hit": f["hit"], "fix": f["fix"]}
+                         for f in found]}
+
+
+def api_test_pattern(b):
+    try:
+        rx = compile_custom({**b, "severity": "HIGH"})[3]
+    except ValueError as e:
+        return {"error": str(e)}
+    m = rx.search(str(b.get("sample", ""))[:MAX_SCAN])
+    return {"match": mask(m.group(0))[:200] if m else None}
+
+
+def api_add_custom(b):
+    c = {"id": "c-" + secrets.token_hex(3), "why": str(b.get("why", "")).strip()[:200], "pattern": str(b.get("pattern", "")),
+         "regex": bool(b.get("regex")), "severity": b.get("severity"), "fix": str(b.get("fix", "")).strip()[:300],
+         "files": bool(b.get("files"))}
+    if not c["why"]:
+        raise ValueError("Напишите, что ловит шаблон")
+    compile_custom(c)
+    update_config(lambda cfg: cfg["custom"].append(c))
+    audit_event(f"Добавлен свой шаблон «{c['why']}» ({c['severity']})")
+    return {"ok": True, "id": c["id"]}
+
+
+def api_toggle(b):
+    rid, on = str(b.get("id", "")), bool(b.get("enabled"))
+    if rid in LOCKED:
+        raise ValueError("Самозащиту отключить нельзя: иначе агент сможет выключить TwoKey")
+    if rid not in {r[0] for r in BUILTIN} | {c.get("id") for c in CONFIG["custom"]}:
+        raise ValueError("Нет такого правила")
+
+    def change(cfg):
+        cfg["disabled"] = [x for x in cfg["disabled"] if x != rid] + ([] if on else [rid])
+    update_config(change)
+    audit_event(f"Правило {rid} {'включено' if on else 'отключено'}")
+    return {"ok": True}
+
+
+def api_delete_custom(b):
+    rid = str(b.get("id", ""))
+    if rid not in {c.get("id") for c in CONFIG["custom"]}:
+        raise ValueError("Нет такого шаблона")
+
+    def change(cfg):
+        cfg["custom"] = [c for c in cfg["custom"] if c.get("id") != rid]
+        cfg["disabled"] = [x for x in cfg["disabled"] if x != rid]
+    update_config(change)
+    audit_event(f"Удалён свой шаблон {rid}")
+    return {"ok": True}
+
+
+def api_forget(b):
+    with LOCK:
+        gone = ALLOW.pop(str(b.get("id", "")), None)
+        if gone:
+            _save_allow()
+    if not gone:
+        raise ValueError("Нет такой записи")
+    audit_event(f"Убрано из «Разрешать всегда»: {gone['action'][:120]}")
+    return {"ok": True}
+
+
+def api_decide(b):
+    rid, choice, text = str(b.get("rid", "")), str(b.get("choice", "")), str(b.get("text", "")).strip()
+    if choice not in ("a", "d", "s", "m", "w") or (choice == "s" and not text):
+        raise ValueError("Неверное решение")
+    if not resolve(rid, choice, who="панель", text=text[:1000] if choice == "s" else ""):
+        raise ValueError("Запрос уже закрыт")
+    return {"ok": True}
+
+
+API = {"/api/check": api_check, "/api/test-pattern": api_test_pattern, "/api/rules/custom": api_add_custom,
+       "/api/rules/toggle": api_toggle, "/api/rules/delete": api_delete_custom, "/api/allow/delete": api_forget,
+       "/api/decide": api_decide}
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != "/health":
-            return self.reply(404, {"error": "not found"})
-        self.reply(200, {"ok": True, "telegram": bool(TG_TOKEN and TG_CHAT_ID), "judge": JUDGE, "pending": len(PENDING)})
+        path = self.path.split("?")[0]
+        if path == "/health":
+            return self.reply(200, {"ok": True, "telegram": bool(TG_TOKEN and TG_CHAT_ID), "judge": JUDGE, "pending": len(PENDING)})
+        if not self.local_origin():
+            return self.reply(403, {"error": "панель открывается только с этого компьютера"})
+        if path == "/":
+            return self.page()
+        if path == "/api/state":
+            return self.reply(200, panel_state()) if self.token_ok() else self.reply(401, {"error": "нужен токен из окна сервера"})
+        self.reply(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path != "/check":
+        path = self.path.split("?")[0]
+        if path == "/check":
+            if self.headers.get("Origin"):  # браузер с чужой страницы, а не хук агента
+                return self.reply(403, {"error": "запросы из браузера сюда не принимаются"})
+            req = self.body()
+            if req is None:
+                return self.reply(400, {"error": "ожидается JSON-объект {tool, input}"})
+            try:
+                res = decide(req)
+            except Exception as e:
+                res = {"decision": "deny", "by": "error", "reason": f"TwoKey: внутренняя ошибка ({e}). Заблокировано (fail-closed)."}
+            return self.reply(200, res)
+        if path == "/api/login":  # билет из ссылки → токен сессии; билет сгорает
+            if not self.local_origin():
+                return self.reply(403, {"error": "панель открывается только с этого компьютера"})
+            ticket = str((self.body() or {}).get("ticket", ""))
+            with LOCK:
+                ok = bool(UI_TOKEN) and ticket in UI_TICKETS
+                UI_TICKETS.discard(ticket)
+            return self.reply(200, {"token": UI_TOKEN}) if ok else self.reply(
+                401, {"error": "ссылка уже использована — новая: /panel в боте или перезапуск сервера"})
+        if path not in API:
             return self.reply(404, {"error": "not found"})
+        if not self.local_origin():
+            return self.reply(403, {"error": "панель открывается только с этого компьютера"})
+        if not self.token_ok():
+            return self.reply(401, {"error": "нужен токен из окна сервера"})
+        b = self.body()
+        if b is None:
+            return self.reply(400, {"error": "ожидается JSON-объект"})
         try:
-            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-            if not isinstance(req, dict):
-                raise ValueError
+            self.reply(200, API[path](b))
+        except ValueError as e:
+            self.reply(400, {"error": str(e)})
+
+    def body(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            if not 0 <= n <= 2_000_000:  # отрицательная длина повесила бы поток, огромная — съела бы память
+                return None
+            b = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
-            return self.reply(400, {"error": "ожидается JSON-объект {tool, input}"})
+            return None
+        return b if isinstance(b, dict) else None
+
+    def local_origin(self):
+        """Защита от DNS rebinding и чужих страниц: только наш адрес в Host и Origin."""
+        port = self.server.server_address[1]
+        ours = (f"127.0.0.1:{port}", f"localhost:{port}")
+        origin = self.headers.get("Origin")
+        return self.headers.get("Host", "") in ours and (not origin or origin in tuple("http://" + o for o in ours))
+
+    def token_ok(self):
+        return bool(UI_TOKEN) and hmac.compare_digest(self.headers.get("X-TwoKey-Token", ""), UI_TOKEN)
+
+    def page(self):
+        nonce = secrets.token_urlsafe(12)
         try:
-            res = decide(req)
-        except Exception as e:
-            res = {"decision": "deny", "by": "error", "reason": f"TwoKey: внутренняя ошибка ({e}). Заблокировано (fail-closed)."}
-        self.reply(200, res)
+            with open(os.path.join(HERE, "ui.html"), encoding="utf-8") as f:
+                body = f.read().replace("{{NONCE}}", nonce).encode()
+        except OSError:
+            return self.reply(500, {"error": "нет файла ui.html рядом с guardian.py"})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Security-Policy", f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
+                                                    "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; "
+                                                    "frame-ancestors 'none'")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def reply(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -709,15 +1024,25 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve():
+    global UI_TOKEN
+    UI_TOKEN = secrets.token_urlsafe(24)
     if TG_TOKEN:
         threading.Thread(target=poll_forever, daemon=True).start()
     if not (TG_TOKEN and TG_CHAT_ID):
-        log("Telegram не настроен: опасные действия уйдут в локальное подтверждение. "
+        log("Telegram не настроен: опасные действия придут в панель, если она открыта, иначе — в локальное подтверждение. "
             "Напишите боту /start — он пришлёт chat_id.")
     if TG_CHAT_ID.startswith("-") and not TG_ADMINS:
         sys.exit("TG_CHAT_ID — группа: задайте TG_ADMINS (id тех, кто может решать), иначе решать сможет любой участник.")
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    url = panel_link()
     log(f"TwoKey слушает http://{HOST}:{PORT} · AI-судья: {JUDGE} · ожидание решения: {TIMEOUT} с")
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    log(f"Панель управления (ссылка одноразовая; новая — /panel в боте или перезапуск): {url}")
+    try:
+        import webbrowser
+        webbrowser.open(url)
+    except Exception:
+        pass
+    srv.serve_forever()
 
 
 # ------------------------------------------------------------- клиенты ---
@@ -836,7 +1161,12 @@ def log(msg):
 
 # ------------------------------------------------------------ самопроверка ---
 def selftest():
-    global tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT, ALLOW_FILE
+    global tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT, ALLOW_FILE, RULES_FILE, UI_TOKEN, LAST_PANEL_POLL
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    saved_cfg, saved_rules_file = CONFIG, RULES_FILE
+    RULES_FILE = os.path.join(tmp, "rules.json")  # тест не трогает ваши настоящие правила
+    apply_config({"disabled": [], "custom": []})
     B = lambda c: evaluate("Bash", {"command": c})[0]
     fake_key = "sk_live_" + "A" * 24
     cases = [
@@ -855,6 +1185,9 @@ def selftest():
         (B("find . " * 20000), HIGH), (B("cd ~/.claude && cp /tmp/x.json settings.json"), CRITICAL),
         (B("Get-ChildItem C:/proj | Remove-Item -Recurse -Force"), HIGH), (B("taskkill /F /IM python.exe"), CRITICAL),
         (B("printf 'GUARDIAN_PORT=9999' >> ~/twokey/.env"), CRITICAL),
+        (B(f"curl -X POST http://127.0.0.1:{PORT}/api/rules/toggle -d '{{}}'"), CRITICAL),  # агент лезет в панель
+        (B(f"curl http://2130706433:{PORT}/api/state"), CRITICAL),  # тот же 127.0.0.1, записанный числом
+        (evaluate("mcp__fs__write_file", {"path": os.path.join(HERE, "rules.json"), "content": "{}"})[0], CRITICAL),
         (evaluate("Write", {"file_path": "/p/cleanup.sh", "content": "rm -rf ~"})[0], MEDIUM),
         (evaluate("mcp__shell__run", {"command": "rm", "args": ["-rf", "/"]})[0], CRITICAL),
         (evaluate("mcp__db__deleteDatabase", {"name": "prod"})[0], HIGH),
@@ -882,12 +1215,36 @@ def selftest():
     assert hook_output({"decision": "deny", "reason": "x"})["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert hook_output({"decision": "stop", "reason": "x"})["continue"] is False
 
+    # свои шаблоны и отключение правил
+    assert B("sudo apt install jq") == MEDIUM
+    apply_config({"disabled": ["sudo", "self"], "custom": [
+        {"id": "c-1", "why": "Платежи", "pattern": "DELETE FROM payments", "severity": "CRITICAL"},
+        {"id": "c-2", "why": "Скрипт деплоя", "pattern": "deploy.sh", "severity": "HIGH"},
+        {"id": "c-3", "why": "Внутренний хост", "pattern": r"billing\.internal", "regex": True, "severity": "HIGH", "files": True},
+        {"id": "c-bad", "why": "битый", "pattern": "(", "regex": True, "severity": "HIGH"}]})
+    assert B("sudo apt install jq") == SAFE  # отключённое правило молчит
+    assert B("rm guardian.py") == CRITICAL  # самозащиту отключить нельзя, даже правкой rules.json
+    assert B("psql -c 'delete from payments where id=1'") == CRITICAL  # свой шаблон, регистр не важен
+    assert B("bash deploy.sh") == HIGH and B("bash deployxsh") == SAFE  # обычный текст: точка — это точка
+    assert evaluate("Write", {"file_path": "a.py", "content": "URL = 'https://billing.internal/x'"})[0] == HIGH  # и в файлах
+    assert evaluate("Write", {"file_path": "a.sql", "content": "DELETE FROM payments;"})[0] == SAFE  # без «в файлах» — нет
+    assert not [r for r in RULES if r[0] == "c-bad"]  # битый шаблон пропущен, остальные работают
+    for p in ("D:/tools/guard/rules.json", r"D:\tools\guard", "/d/tools/guard/allow.json"):  # самозащита без «twokey» в пути
+        assert re.search(_path_rx(r"D:\tools\guard"), p, re.I), p
+    for bad in ({"pattern": "(", "regex": True, "severity": "HIGH"}, {"pattern": "x", "severity": "LOW"},
+                {"pattern": " ", "severity": "HIGH"}, {"pattern": r"(\w+\s?)+$", "regex": True, "severity": "HIGH"}):
+        try:
+            compile_custom(bad)
+            raise AssertionError(f"шаблон должен быть отклонён: {bad}")
+        except ValueError:
+            pass
+    apply_config({"disabled": [], "custom": []})
+
     # человек в контуре: поддельный Telegram
     sent, real = [], (tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT, ALLOW_FILE, dict(ALLOW))
     tg = lambda method, **p: sent.append((method, p)) or {"message_id": 1}
     TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT = "x", "42", 5, "off", os.devnull
-    import tempfile
-    ALLOW_FILE = os.path.join(tempfile.mkdtemp(), "allow.json")
+    ALLOW_FILE = os.path.join(tmp, "allow.json")
     ALLOW.clear()
     keyboard = lambda: json.dumps([p.get("reply_markup") for m, p in sent if m == "sendMessage"][-1])
 
@@ -941,13 +1298,68 @@ def selftest():
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         r = post(f"http://127.0.0.1:{srv.server_port}/check", {"tool": "Bash", "input": {"command": "ls"}}, 5)
         assert r["decision"] == "allow", r
+
+        # панель: токен, чужие страницы, правила, решение из панели
+        base = f"http://127.0.0.1:{srv.server_port}"
+
+        def call(path, body=None, token="t0ken", origin=None):
+            hdrs = {"X-TwoKey-Token": token, "Content-Type": "application/json", **({"Origin": origin} if origin else {})}
+            req = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), headers=hdrs)
+            try:
+                with _NO_PROXY.open(req, timeout=5) as resp:
+                    return resp.status, resp.read()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read()
+
+        UI_TOKEN, TIMEOUT = "t0ken", 5
+        UI_TICKETS.add("tk1")  # одноразовая ссылка: билет → токен, второй раз не работает
+        code, body = call("/api/login", {"ticket": "tk1"}, token="")
+        assert code == 200 and json.loads(body)["token"] == "t0ken", body
+        assert call("/api/login", {"ticket": "tk1"}, token="")[0] == 401
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", srv.server_port, timeout=5)  # отрицательная длина не вешает поток
+        conn.putrequest("POST", "/api/check", skip_host=True)
+        for k, v in (("Host", f"127.0.0.1:{srv.server_port}"), ("X-TwoKey-Token", "t0ken"), ("Content-Length", "-5")):
+            conn.putheader(k, v)
+        conn.endheaders()
+        assert conn.getresponse().status == 400
+        conn.close()
+        assert call("/api/state", token="bad")[0] == 401  # без токена панель закрыта
+        assert call("/api/state", origin="http://evil.example")[0] == 403  # чужая страница в браузере
+        assert call("/check", {"tool": "Bash", "input": {"command": "ls"}}, origin="http://evil.example")[0] == 403
+        code, page = call("/")
+        assert code == 200 and b"TwoKey" in page and b"{{NONCE}}" not in page
+        code, body = call("/api/check", {"command": "git push --force origin main"})
+        assert code == 200 and json.loads(body)["severity"] == "CRITICAL"
+        assert call("/api/rules/toggle", {"id": "self", "enabled": False})[0] == 400  # самозащиту не отключить
+        assert call("/api/rules/toggle", {"id": "sudo", "enabled": False})[0] == 200 and B("sudo ls") == SAFE
+        code, body = call("/api/rules/custom", {"why": "Платежи", "pattern": "payments", "severity": "CRITICAL"})
+        assert code == 200 and B("select * from payments") == CRITICAL
+        assert json.load(open(RULES_FILE, encoding="utf-8"))["custom"]  # сохранено на диск
+        assert call("/api/rules/custom", {"why": "битый", "pattern": "(", "regex": True, "severity": "HIGH"})[0] == 400
+        call("/api/state")  # панель открыта → без Telegram решение ждём в ней
+        out = {}
+        t = threading.Thread(target=lambda: out.update(decide({"tool": "Bash", "input": {"command": "DROP TABLE users"}})))
+        t.start()
+        while not PENDING:
+            time.sleep(0.01)
+        state = json.loads(call("/api/state")[1])
+        assert state["pending"] and state["pending"][0]["severity"] == "CRITICAL", state
+        assert call("/api/decide", {"rid": state["pending"][0]["rid"], "choice": "d"})[0] == 200
+        t.join()
+        assert out["decision"] == "deny" and out["by"] == "human", out
         srv.shutdown()
     finally:
         tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT, ALLOW_FILE, saved = real
         ALLOW.clear()
         ALLOW.update(saved)
-    print(f"OK: {len(cases)} правил-кейсов + сценарии Telegram и HTTP")
+        RULES_FILE, UI_TOKEN, LAST_PANEL_POLL = saved_rules_file, "", -1e9
+        UI_TICKETS.clear()
+        apply_config(saved_cfg)
+    print(f"OK: {len(cases)} правил-кейсов + свои шаблоны, Telegram, HTTP и панель")
 
+
+apply_config(_load_config())  # и сервер, и каждый запуск хука видят одни и те же правила
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
