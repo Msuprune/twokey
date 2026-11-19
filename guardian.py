@@ -15,7 +15,7 @@
 
 Только стандартная библиотека. Для AI-судьи: pip install anthropic.
 """
-import html, json, os, re, secrets, sys, threading, time, urllib.error, urllib.request
+import hashlib, html, json, os, re, secrets, sys, threading, time, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +40,7 @@ TIMEOUT = int(os.environ.get("GUARDIAN_TIMEOUT", "300"))
 JUDGE = os.environ.get("GUARDIAN_JUDGE", "risky")  # off | risky | all
 MODEL = os.environ.get("GUARDIAN_MODEL", "claude-opus-5-5")
 AUDIT = os.environ.get("GUARDIAN_AUDIT", os.path.join(HERE, "audit.jsonl"))
+ALLOW_FILE = os.path.join(HERE, "allow.json")  # «Разрешать всегда»; папка TwoKey защищена от записи агентом
 
 SAFE, LOW, MEDIUM, HIGH, CRITICAL = range(5)
 LEVELS = ["SAFE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -422,6 +423,7 @@ CHOICES = {  # код кнопки: (решение для агента, под�
     "s": ("deny", "✍️ Своё решение"),
     "m": ("stop", "🛠 Разбирается человек"),
     "t": ("deny", "⏱ Нет ответа — отклонено автоматически"),
+    "w": ("allow", "♾ Разрешено всегда"),
 }
 REASONS = {
     "a": "TwoKey: действие одобрено человеком в Telegram.",
@@ -430,7 +432,38 @@ REASONS = {
     "s": "TwoKey: человек отклонил действие и написал, что сделать вместо него:\n{text}\nСледуй этой инструкции.",
     "m": "TwoKey: человек взял ситуацию на себя и разбирается вручную. Остановись и жди указаний.",
     "t": "TwoKey: человек не ответил за {timeout} с — действие заблокировано. Не повторяй его без явного разрешения.",
+    "w": "TwoKey: человек разрешил это действие; такое же действие в этой папке дальше будет проходить без вопроса.",
 }
+
+
+def _load_allow():
+    try:
+        with open(ALLOW_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+ALLOW = _load_allow()  # id → {tool, cwd, action, who, ts}
+
+
+def _save_allow():  # вызывать под LOCK
+    try:
+        with open(ALLOW_FILE, "w", encoding="utf-8") as f:
+            json.dump(ALLOW, f, ensure_ascii=False, indent=1)
+    except OSError as e:
+        log(f"Не удалось сохранить {ALLOW_FILE}: {e}")
+
+
+def allow_key(req):
+    """То же самое действие в той же папке: точный текст команды, а не похожая (описание и таймаут не в счёт)."""
+    inp = req.get("input") or {}
+    if isinstance(inp, dict) and isinstance(inp.get("command"), str):
+        action = inp["command"]
+    else:
+        action = json.dumps(inp, sort_keys=True, ensure_ascii=False)
+    raw = json.dumps([str(req.get("tool", "")), str(req.get("cwd") or ""), action], ensure_ascii=False)
+    return hashlib.sha256(raw.encode()).hexdigest()[:10]
 
 
 def tg(method, **params):
@@ -486,12 +519,18 @@ def btn(label, code, rid):
 def resolve(rid, choice, who="", text=""):
     with LOCK:
         p = PENDING.get(rid)
-        if not p or p["decision"] or choice not in CHOICES:
-            return False
+        if not p or p["decision"] or choice not in CHOICES or (choice == "w" and not p.get("allow")):
+            return False  # «всегда» — только там, где кнопку показали (не на критичном)
         p["decision"], p["note"] = choice, text
+        if choice == "w":
+            key, entry = p["allow"]
+            ALLOW[key] = {**entry, "who": who, "ts": time.strftime("%Y-%m-%d %H:%M")}
+            _save_allow()
     note = f"\n\n<b>Решение:</b> {CHOICES[choice][1]}" + (f" — {esc(who)}" if who else "")
     if text:
         note += f"\n<i>{esc(text, 500)}</i>"
+    if choice == "w":
+        note += f"\nОтменить: /forget {p['allow'][0]} · весь список: /always"
     if p.get("msg_id"):
         tg_safe("editMessageText", chat_id=TG_CHAT_ID, message_id=p["msg_id"], text=p["text"] + note, parse_mode="HTML")
     p["event"].set()
@@ -502,12 +541,16 @@ def ask_human(req, sev, found, ai, deadline):
     rid = secrets.token_hex(4)
     p = {"event": threading.Event(), "decision": None, "text": render(req, sev, found, ai),
          "excerpt": head_tail(shown(req.get("input") or {}), 80)}
+    rows = [[btn("✅ Пропустить", "a", rid), btn("❌ Отклонить", "d", rid)],
+            [btn("✍️ Своё решение", "s", rid), btn("🛠 Разберусь вручную", "m", rid)]]
+    if sev == HIGH:  # критичное навсегда не разрешаем — только по одному разу
+        p["allow"] = (allow_key(req), {"tool": str(req.get("tool", "")), "cwd": str(req.get("cwd") or ""),
+                                       "action": head_tail(shown(req.get("input") or {}), 200)})
+        rows.append([btn("♾ Разрешать всегда", "w", rid)])
     with LOCK:
         PENDING[rid] = p
     try:
-        msg = tg("sendMessage", chat_id=TG_CHAT_ID, text=p["text"], parse_mode="HTML", reply_markup={"inline_keyboard": [
-            [btn("✅ Пропустить", "a", rid), btn("❌ Отклонить", "d", rid)],
-            [btn("✍️ Своё решение", "s", rid), btn("🛠 Разберусь вручную", "m", rid)]]})
+        msg = tg("sendMessage", chat_id=TG_CHAT_ID, text=p["text"], parse_mode="HTML", reply_markup={"inline_keyboard": rows})
         p["msg_id"] = msg["message_id"]
     except Exception as e:
         with LOCK:
@@ -552,19 +595,39 @@ def handle_update(u):
         ok = resolve(rid, choice, who=cq["from"].get("first_name", user))
         tg_safe("answerCallbackQuery", callback_query_id=cq["id"], text="Принято" if ok else "Запрос уже закрыт")
     elif msg := u.get("message"):
-        chat, text = str(msg["chat"]["id"]), msg.get("text") or ""
-        if text.startswith("/start"):
-            tg_safe("sendMessage", chat_id=chat, text=f"TwoKey на связи. chat_id этого чата: {chat}")
-        elif text and authorized(chat, user := str(msg.get("from", {}).get("id"))):
-            reply_to = (msg.get("reply_to_message") or {}).get("message_id")
+        chat, text, user = str(msg["chat"]["id"]), msg.get("text") or "", str(msg.get("from", {}).get("id"))
+        cmd, _, arg = text.partition(" ")
+        cmd = cmd.split("@")[0]  # в группах команда приходит как /forget@имя_бота
+        if cmd == "/start":
+            tg_safe("sendMessage", chat_id=chat, text=f"TwoKey на связи. chat_id этого чата: {chat}\n"
+                                                      "/always — что разрешено навсегда, /forget <id> — отменить")
+            return
+        if not text or not authorized(chat, user):
+            return
+        if cmd == "/always":
             with LOCK:
-                rid, prompt_id = AWAIT_TEXT.get((chat, user), (None, None))
-                if rid and reply_to == prompt_id:
-                    del AWAIT_TEXT[(chat, user)]
-                else:
-                    rid = None
-            if rid:
-                resolve(rid, "s", who=msg["from"].get("first_name", ""), text=text)
+                lines = [f"{k} · {v['tool']} · {v['action']}" + (f" · {v['cwd']}" if v.get("cwd") else "")
+                         for k, v in ALLOW.items()]
+            tg_safe("sendMessage", chat_id=chat, text=("♾ Разрешено навсегда:\n" + "\n".join(lines))[:4000] if lines
+                    else "Список «Разрешать всегда» пуст.")
+            return
+        if cmd == "/forget":
+            with LOCK:
+                gone = ALLOW.pop(arg.strip(), None)
+                if gone:
+                    _save_allow()
+            tg_safe("sendMessage", chat_id=chat, text=f"Убрано, снова будет спрашивать: {gone['action']}" if gone
+                    else "Нет такого id. Список: /always")
+            return
+        reply_to = (msg.get("reply_to_message") or {}).get("message_id")
+        with LOCK:
+            rid, prompt_id = AWAIT_TEXT.get((chat, user), (None, None))
+            if rid and reply_to == prompt_id:
+                del AWAIT_TEXT[(chat, user)]
+            else:
+                rid = None
+        if rid:
+            resolve(rid, "s", who=msg["from"].get("first_name", ""), text=text)
 
 
 def poll_forever():
@@ -583,6 +646,13 @@ def poll_forever():
 def decide(req):
     deadline = time.monotonic() + TIMEOUT
     tool, inp = str(req.get("tool", "?")), req.get("input") or {}
+    with LOCK:
+        always = ALLOW.get(allow_key(req))
+    if always and evaluate(tool, inp)[0] < CRITICAL:  # если правила стали строже — снова спросим
+        res = {"decision": "allow", "by": "allowlist", "reason": "", "severity": "HIGH", "findings": [], "ai": None,
+               "choice": f"♾ Разрешено всегда ({always.get('who', '')}, {always.get('ts', '')})"}
+        audit(req, res)
+        return res
     sev, found, ai = assess(tool, inp)
     if sev < HIGH:
         res = {"decision": "allow", "by": "rules", "reason": ""}
@@ -766,7 +836,7 @@ def log(msg):
 
 # ------------------------------------------------------------ самопроверка ---
 def selftest():
-    global tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT
+    global tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT, ALLOW_FILE
     B = lambda c: evaluate("Bash", {"command": c})[0]
     fake_key = "sk_live_" + "A" * 24
     cases = [
@@ -813,9 +883,13 @@ def selftest():
     assert hook_output({"decision": "stop", "reason": "x"})["continue"] is False
 
     # человек в контуре: поддельный Telegram
-    sent, real = [], (tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT)
+    sent, real = [], (tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT, ALLOW_FILE, dict(ALLOW))
     tg = lambda method, **p: sent.append((method, p)) or {"message_id": 1}
     TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT = "x", "42", 5, "off", os.devnull
+    import tempfile
+    ALLOW_FILE = os.path.join(tempfile.mkdtemp(), "allow.json")
+    ALLOW.clear()
+    keyboard = lambda: json.dumps([p.get("reply_markup") for m, p in sent if m == "sendMessage"][-1])
 
     def run(cmd, *updates):
         out = {}
@@ -841,11 +915,26 @@ def selftest():
                 say("сначала сделай бэкап"))
         assert r["decision"] == "deny" and "бэкап" in r["reason"] and "force" not in r["reason"], r  # чужой текст не принят
         assert run("DROP TABLE users", cb("m:RID"))["decision"] == "stop"
+        # «Разрешать всегда»: на критичном кнопки нет, и подделанное нажатие не сработает
+        r = run("DROP TABLE users", cb("w:RID"), cb("d:RID"))
+        assert r["decision"] == "deny" and '"w:' not in keyboard() and not ALLOW, r
+        r = run("npm publish", cb("w:RID"))  # HIGH: кнопка есть
+        assert r["decision"] == "allow" and '"w:' in keyboard() and len(ALLOW) == 1, r
+        assert json.load(open(ALLOW_FILE, encoding="utf-8"))  # сохранено на диск
+        r = decide({"tool": "Bash", "input": {"command": "npm publish", "description": "другое описание"}})
+        assert r["by"] == "allowlist", r  # повтор — без вопроса
+        r = run("npm publish --tag beta", cb("d:RID"))  # другая команда — снова спрашивает
+        assert r["decision"] == "deny", r
+        handle_update(say("/always", reply=None))
+        assert "npm publish" in sent[-1][1]["text"]
+        handle_update(say(f"/forget {next(iter(ALLOW))}", reply=None))
+        assert not ALLOW and "Убрано" in sent[-1][1]["text"]
+        assert run("npm publish", cb("d:RID"))["decision"] == "deny"  # после /forget снова спрашивает
         TIMEOUT = 0.2
         r = run("DROP TABLE users")
         assert r["decision"] == "deny" and r["by"] == "timeout", r
         texts = [p["text"] for m, p in sent if m == "sendMessage" and "parse_mode" in p]
-        assert texts and all("КРИТИЧЕСКИЙ" in t and "inline_keyboard" not in t for t in texts)
+        assert texts and all("TwoKey · риск" in t and "inline_keyboard" not in t for t in texts)
         TG_TOKEN = ""  # без Telegram опасное уходит в локальное подтверждение
         assert decide({"tool": "Bash", "input": {"command": "DROP TABLE users"}})["decision"] == "ask"
         srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -854,7 +943,9 @@ def selftest():
         assert r["decision"] == "allow", r
         srv.shutdown()
     finally:
-        tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT = real
+        tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT, ALLOW_FILE, saved = real
+        ALLOW.clear()
+        ALLOW.update(saved)
     print(f"OK: {len(cases)} правил-кейсов + сценарии Telegram и HTTP")
 
 
