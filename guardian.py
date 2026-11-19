@@ -1677,7 +1677,7 @@ def log(msg):
 # ------------------------------------------------------------ самопроверка ---
 def selftest():
     global tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT, ALLOW_FILE, RULES_FILE, UI_TOKEN, LAST_PANEL_POLL, URL, ENV_PATH, \
-        PROVIDER, JUDGE_URL, JUDGE_CMD, MODEL, LANG
+        PROVIDER, JUDGE_URL, JUDGE_CMD, MODEL, LANG, TICKET_FILE
     import contextlib, io, tempfile
     tmp = tempfile.mkdtemp()
     saved_cfg, saved_rules_file = CONFIG, RULES_FILE
@@ -1965,6 +1965,15 @@ def selftest():
         code, body = call("/api/login", {"ticket": "tk1"}, token="")
         assert code == 200 and json.loads(body)["token"] == "t0ken", body
         assert call("/api/login", {"ticket": "tk1"}, token="")[0] == 401
+        saved_tf, TICKET_FILE = TICKET_FILE, os.path.join(tmp, "panel.ticket")  # билет для программы TwoKey
+        try:
+            refresh_ticket_file()
+            first = open(TICKET_FILE, encoding="utf-8").read()
+            assert call("/api/login", {"ticket": first}, token="")[0] == 200
+            assert open(TICKET_FILE, encoding="utf-8").read() != first  # программа вошла — в файле уже новый билет
+            assert call("/api/login", {"ticket": first}, token="")[0] == 401  # старый не действует
+        finally:
+            TICKET_FILE = saved_tf
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", srv.server_port, timeout=5)  # отрицательная длина не вешает поток
         conn.putrequest("POST", "/api/check", skip_host=True)
