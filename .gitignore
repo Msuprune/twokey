@@ -5,3 +5,8 @@ __pycache__/
 allow.json
 rules.json
 *.tmp
+# служебные файлы запущенной программы
+panel.ticket
+server.log
+.window/
+.ignore

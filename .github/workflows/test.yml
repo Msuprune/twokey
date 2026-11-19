@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Самопроверка
+        run: python guardian.py test
+      - name: Точность правил (ред-тим и слепой набор)
+        run: |
+          python guardian.py bench tests/bench.jsonl
+          python guardian.py bench tests/holdout_danger.jsonl
+          python guardian.py bench tests/holdout_safe.jsonl
+      - name: Переводы (en, kk)
+        run: python tools/i18n.py check
