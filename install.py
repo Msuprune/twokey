@@ -111,24 +111,27 @@ def python_for_hook():
     return next((p for p in found if os.path.exists(p)), sys.executable).replace("\\", "/")
 
 
-def python_org():
+def python_org(need_tk=False):
     """Python 3.10+ с python.org (реестр PythonCore, не из Store), если установщик открыл Python из Microsoft Store:
-    на нём установщик перезапускается. Иначе — пустая строка."""
+    на нём установщик перезапускается. Для окна нужен tkinter — у python.org он ставится по желанию. Иначе — ""."""
     if os.name != "nt" or not in_store(sys.executable):
         return ""
     import winreg
     best = ((0, 0), "")
-    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+    views = ((winreg.HKEY_CURRENT_USER, 0), (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_64KEY),
+             (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_32KEY))  # 32-битный Python «для всех» — в WOW6432Node
+    for root, view in views:
+        access = winreg.KEY_READ | view
         try:
-            core = winreg.OpenKey(root, r"Software\Python\PythonCore")
+            core = winreg.OpenKey(root, r"Software\Python\PythonCore", 0, access)
         except OSError:
             continue
         with core:
             for i in range(winreg.QueryInfoKey(core)[0]):
                 tag = winreg.EnumKey(core, i)
-                m = re.fullmatch(r"(\d+)\.(\d+)", tag)
+                m = re.fullmatch(r"(\d+)\.(\d+)(?:-(?:32|64|arm64))?", tag)  # теги PEP 514: 3.12, 3.12-32, 3.13-arm64
                 try:
-                    with winreg.OpenKey(core, tag + r"\InstallPath") as k:
+                    with winreg.OpenKey(core, tag + r"\InstallPath", 0, access) as k:
                         try:
                             exe = winreg.QueryValueEx(k, "ExecutablePath")[0]
                         except OSError:
@@ -136,7 +139,8 @@ def python_org():
                 except OSError:
                     continue
                 ver = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
-                if ver >= (3, 10) and ver > best[0] and not in_store(exe) and os.path.exists(exe):
+                tk_ok = not need_tk or os.path.exists(os.path.join(os.path.dirname(exe), "DLLs", "_tkinter.pyd"))
+                if ver >= (3, 10) and ver > best[0] and not in_store(exe) and os.path.exists(exe) and tk_ok:
                     best = (ver, exe)
     return best[1]
 
@@ -517,9 +521,10 @@ def main():
         opts["lang"] = "en"
     if sys.version_info < (3, 10):
         fatal(T[opts["lang"]]["py_old"])
-    alt = python_org()
+    console = bool({"--yes", "--uninstall", "--selftest"} & set(args))
+    alt = python_org(need_tk=not console)
     if alt:  # открыл Python из Store — тот же установщик с теми же флагами на python.org
-        if {"--yes", "--uninstall", "--selftest"} & set(args):
+        if console:
             sys.exit(subprocess.call([alt, os.path.abspath(__file__), *args]))
         w = os.path.join(os.path.dirname(alt), "pythonw.exe")
         subprocess.Popen([w if os.path.exists(w) else alt, os.path.abspath(__file__), *args], close_fds=True)
