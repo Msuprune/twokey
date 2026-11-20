@@ -404,8 +404,6 @@ def gui(opts):
     from tkinter import messagebox, ttk
     root = tk.Tk()
     root.configure(bg=BG)
-    root.geometry("640x600")
-    root.minsize(560, 520)
     style = ttk.Style(root)
     style.theme_use("clam")
     style.configure(".", background=BG, foreground=FG, font=("Segoe UI", 10))
@@ -416,6 +414,8 @@ def gui(opts):
     style.configure("Accent.TButton", background=ACCENT, foreground=BG, font=("Segoe UI", 10, "bold"))
     style.map("Accent.TButton", background=[("active", "#FF8550"), ("disabled", "#7a4a33")])
     style.configure("TCombobox", fieldbackground=SURFACE, background=SURFACE, foreground=FG, arrowcolor=FG)
+    style.map("TCombobox", fieldbackground=[("readonly", SURFACE)], foreground=[("readonly", FG)],  # clam красит readonly
+              selectbackground=[("readonly", SURFACE)], selectforeground=[("readonly", FG)])  # светлым: текст сливался
     root.option_add("*TCombobox*Listbox.background", SURFACE)
     root.option_add("*TCombobox*Listbox.foreground", FG)
 
@@ -445,19 +445,19 @@ def gui(opts):
     folder = tk.Label(body, bg=BG, fg=MUTED, anchor="w", justify="left", wraplength=580)
     folder.pack(fill="x", pady=(8, 0))
 
-    log = tk.Text(root, height=10, bg=LOGBG, fg=FG, relief="flat", font=("Cascadia Mono", 9), wrap="word",
-                  highlightthickness=1, highlightbackground="#2A3847", padx=10, pady=8)
-    log.pack(fill="both", expand=True, padx=24, pady=(4, 12))
-    log.configure(state="disabled")
-
-    buttons = tk.Frame(root, bg=BG)
-    buttons.pack(fill="x", padx=24, pady=(0, 20))
+    buttons = tk.Frame(root, bg=BG)  # кнопки — первыми в порядке упаковки: в маленьком окне сжимается журнал, а не они
+    buttons.pack(side="bottom", fill="x", padx=24, pady=(0, 20), before=head)
     b_install = ttk.Button(buttons, style="Accent.TButton")
     b_remove = ttk.Button(buttons)
     b_close = ttk.Button(buttons, command=root.destroy)
     b_install.pack(side="left")
     b_remove.pack(side="left", padx=10)
     b_close.pack(side="right")
+
+    log = tk.Text(root, height=8, bg=LOGBG, fg=FG, relief="flat", font=("Cascadia Mono", 9), wrap="word",
+                  highlightthickness=1, highlightbackground="#2A3847", padx=10, pady=8)
+    log.pack(fill="both", expand=True, padx=24, pady=(4, 12))
+    log.configure(state="disabled")
 
     def lang():
         return next(k for k, v in names.items() if v == lang_var.get())
@@ -473,8 +473,12 @@ def gui(opts):
         b_install.configure(text=t["update"] if os.path.exists(os.path.join(opts["home"], "guardian.py")) else t["install"])
         b_remove.configure(text=t["remove"])
         b_close.configure(text=t["close"])
-    combo.bind("<<ComboboxSelected>>", texts)
+    combo.bind("<<ComboboxSelected>>", lambda e: (combo.selection_clear(), texts()))
     texts()
+    root.update_idletasks()  # размер окна — по содержимому (шрифты зависят от масштаба экрана), но не выше экрана
+    w, h = max(640, root.winfo_reqwidth()), min(root.winfo_reqheight(), root.winfo_screenheight() - 80)
+    root.geometry(f"{w}x{h}")
+    root.minsize(min(w, 560), min(h, h - log.winfo_reqheight() + 60))  # уменьшается только за счёт журнала
 
     def say(line):
         def add():
