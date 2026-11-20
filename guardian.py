@@ -1168,9 +1168,15 @@ STARTUP_LNK = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows"
 
 
 def pythonw():
-    """pythonw.exe рядом с текущим python — запуск без консольного окна."""
-    p = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    return p if os.path.exists(p) else sys.executable
+    """pythonw рядом с текущим python — запуск без консольного окна. Python из Microsoft Store — через постоянный
+    псевдоним в %LOCALAPPDATA%\\Microsoft\\WindowsApps: папка пакета меняется при каждом обновлении Python."""
+    folder, name = os.path.split(sys.executable)
+    m = re.fullmatch(r"pythonw?([\d.]*)\.exe", name, re.I)
+    want = f"pythonw{m.group(1)}.exe" if m else "pythonw.exe"
+    found = [os.path.join(folder, want), os.path.join(folder, "pythonw.exe")]
+    if "\\windowsapps\\" in sys.executable.lower():
+        found.insert(0, os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WindowsApps", want))
+    return next((p for p in found if os.path.exists(p)), sys.executable)
 
 
 def make_shortcut(lnk, target, args, desc, workdir=HERE):

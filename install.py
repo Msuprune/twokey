@@ -35,7 +35,8 @@ T = {
         stopping="↻ Останавливаю сервер TwoKey…", old_rm="⚠ Работает старая версия сервера TwoKey — закройте её окно (Ctrl+C)",
         hook_none="• Хука TwoKey в {} не нашлось — отключать нечего",
         no_tk="Нет модуля tkinter. Запустите в консоли: python install.py --yes",
-        hooks_off="⚠ В настройках Claude Code выключены все хуки — TwoKey не сработает. Включите хуки (/hooks) и запустите установку снова"),
+        hooks_off="⚠ В настройках Claude Code выключены все хуки — TwoKey не сработает. Включите хуки (/hooks) и запустите установку снова",
+        store="⚠ Установка идёт на Python из Microsoft Store: ярлык в «Пуске» и автозапуск могут не появиться. Надёжнее — Python с python.org"),
     "en": dict(
         title="TwoKey setup", sub="The second key for AI agents", lang="Language",
         hook="Protect Claude Code (all projects)", desktop="Desktop shortcut", menu="Start menu shortcut",
@@ -54,7 +55,8 @@ T = {
         stopping="↻ Stopping the TwoKey server…", old_rm="⚠ An old TwoKey server version is running — close its window (Ctrl+C)",
         hook_none="• No TwoKey hook found in {} — nothing to disconnect",
         no_tk="tkinter is missing. Run in a console: python install.py --yes",
-        hooks_off="⚠ All hooks are turned off in the Claude Code settings — TwoKey will not run. Turn hooks on (/hooks) and run setup again"),
+        hooks_off="⚠ All hooks are turned off in the Claude Code settings — TwoKey will not run. Turn hooks on (/hooks) and run setup again",
+        store="⚠ Setup runs on Python from the Microsoft Store: the Start menu shortcut and autostart may not appear. Python from python.org is more reliable"),
     "kk": dict(
         title="TwoKey орнату", sub="ЖИ-агенттерге арналған екінші кілт", lang="Тіл",
         hook="Claude Code-ты қорғау (барлық жобалар)", desktop="Жұмыс үстеліндегі белгіше", menu="«Бастау» мәзіріндегі белгіше",
@@ -73,7 +75,8 @@ T = {
         stopping="↻ TwoKey серверін тоқтатамын…", old_rm="⚠ TwoKey серверінің ескі нұсқасы жұмыс істеп тұр — оның терезесін жабыңыз (Ctrl+C)",
         hook_none="• {} ішінде TwoKey хугы табылмады — ажырататын ештеңе жоқ",
         no_tk="tkinter модулі жоқ. Консольде іске қосыңыз: python install.py --yes",
-        hooks_off="⚠ Claude Code баптауларында барлық хуктар өшірулі — TwoKey іске қосылмайды. Хуктарды қосып (/hooks), орнатуды қайта іске қосыңыз"),
+        hooks_off="⚠ Claude Code баптауларында барлық хуктар өшірулі — TwoKey іске қосылмайды. Хуктарды қосып (/hooks), орнатуды қайта іске қосыңыз",
+        store="⚠ Орнату Microsoft Store-дағы Python-да жүріп жатыр: «Бастау» мәзіріндегі белгіше мен автоіске қосу шықпауы мүмкін. python.org сайтындағы Python сенімдірек"),
 }
 
 
@@ -89,12 +92,53 @@ def system_lang():
     return "kk" if code.startswith(("kk", "kaz")) else "ru" if code.startswith(("ru", "russian")) else "en"
 
 
+def in_store(exe):
+    """Python из Microsoft Store: папка пакета с номером версии меняется при каждом обновлении Python, а запись
+    в AppData уходит в его личную копию — ярлык «Пуска» и автозапуск могли бы оказаться не видны."""
+    return "\\windowsapps\\" in exe.lower()
+
+
 def python_for_hook():
-    """python.exe (не pythonw): хуку нужен stdout."""
-    exe = sys.executable
-    if os.path.basename(exe).lower() == "pythonw.exe" and os.path.exists(os.path.join(os.path.dirname(exe), "python.exe")):
-        exe = os.path.join(os.path.dirname(exe), "python.exe")
-    return exe.replace("\\", "/")
+    """python (не pythonw: хуку нужен stdout) по постоянному пути: у Python из Store — его псевдоним в WindowsApps."""
+    folder, name = os.path.split(sys.executable)
+    m = re.fullmatch(r"pythonw?([\d.]*)\.exe", name, re.I)
+    found = []
+    if m:
+        want = f"python{m.group(1)}.exe"
+        if in_store(sys.executable):
+            found.append(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WindowsApps", want))
+        found += [os.path.join(folder, want), os.path.join(folder, "python.exe")]
+    return next((p for p in found if os.path.exists(p)), sys.executable).replace("\\", "/")
+
+
+def python_org():
+    """Python 3.10+ с python.org (реестр PythonCore, не из Store), если установщик открыл Python из Microsoft Store:
+    на нём установщик перезапускается. Иначе — пустая строка."""
+    if os.name != "nt" or not in_store(sys.executable):
+        return ""
+    import winreg
+    best = ((0, 0), "")
+    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            core = winreg.OpenKey(root, r"Software\Python\PythonCore")
+        except OSError:
+            continue
+        with core:
+            for i in range(winreg.QueryInfoKey(core)[0]):
+                tag = winreg.EnumKey(core, i)
+                m = re.fullmatch(r"(\d+)\.(\d+)", tag)
+                try:
+                    with winreg.OpenKey(core, tag + r"\InstallPath") as k:
+                        try:
+                            exe = winreg.QueryValueEx(k, "ExecutablePath")[0]
+                        except OSError:
+                            exe = os.path.join(winreg.QueryValueEx(k, "")[0], "python.exe")
+                except OSError:
+                    continue
+                ver = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+                if ver >= (3, 10) and ver > best[0] and not in_store(exe) and os.path.exists(exe):
+                    best = (ver, exe)
+    return best[1]
 
 
 HOOK_ARGS = ["-I", "-S"]  # хук без PYTHONPATH, .pth и sitecustomize: чужой код не запустится раньше защиты
@@ -267,6 +311,8 @@ def install(opts, say):
         say(t["hook_ok"].format(opts["settings"]))
         if hooks_disabled(opts["settings"]):
             say(t["hooks_off"])
+    if os.name == "nt" and in_store(sys.executable):  # python.org не нашёлся — остались на Python из Store
+        say(t["store"])
     cv = g.claude_versions()
     found = " · ".join(f"{k} {v}" for k, v in cv.items() if v)
     if found:
@@ -467,6 +513,13 @@ def main():
         opts["lang"] = "en"
     if sys.version_info < (3, 10):
         fatal(T[opts["lang"]]["py_old"])
+    alt = python_org()
+    if alt:  # открыл Python из Store — тот же установщик с теми же флагами на python.org
+        if {"--yes", "--uninstall", "--selftest"} & set(args):
+            sys.exit(subprocess.call([alt, os.path.abspath(__file__), *args]))
+        w = os.path.join(os.path.dirname(alt), "pythonw.exe")
+        subprocess.Popen([w if os.path.exists(w) else alt, os.path.abspath(__file__), *args], close_fds=True)
+        return
     if {"--yes", "--uninstall", "--selftest"} & set(args):
         for stream in (sys.stdout, sys.stderr):
             if stream:
