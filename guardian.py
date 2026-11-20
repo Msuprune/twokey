@@ -1127,8 +1127,8 @@ def _masked(v):
 
 
 def hook_status():
-    """Подключён ли хук TwoKey в настройках Claude Code (только чтение)."""
-    path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    """Подключён ли хук TwoKey в настройках Claude Code (только чтение; та же папка, что у установщика)."""
+    path = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude"), "settings.json")
     try:
         with open(path, encoding="utf-8-sig") as f:
             groups = (json.load(f).get("hooks") or {}).get("PreToolUse") or []
@@ -1151,12 +1151,13 @@ _VERSIONS = {}
 def claude_versions():
     """Версии Claude Code: приложения Claude (своя копия) и CLI. onFailure работает с 2.1.295."""
     if not _VERSIONS:
-        import glob, subprocess
+        import glob, shutil, subprocess
         found = [os.path.basename(p) for p in glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", "~"), "Claude-Data", "*", "claude-code", "*"))]
         vers = sorted((v for v in found if re.fullmatch(r"\d+\.\d+\.\d+", v)), key=lambda v: tuple(map(int, v.split("."))))
         _VERSIONS["desktop"] = vers[-1] if vers else ""
         try:
-            out = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=15).stdout
+            exe = shutil.which("claude") or "claude"  # which находит и claude.cmd от npm — сам CreateProcess ищет только .exe
+            out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=15).stdout
             _VERSIONS["cli"] = (re.search(r"\d+\.\d+\.\d+", out) or [""])[0]
         except (OSError, subprocess.SubprocessError):
             _VERSIONS["cli"] = ""

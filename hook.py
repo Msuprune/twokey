@@ -7,6 +7,8 @@ import sys
 
 try:
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # хук запускается с -I: папку скрипта Python не добавляет
     import guardian
 
     guardian.hook()

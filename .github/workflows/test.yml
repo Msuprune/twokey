@@ -28,3 +28,5 @@ jobs:
           python guardian.py bench tests/holdout_safe.jsonl
       - name: Переводы (en, kk)
         run: python tools/i18n.py check
+      - name: Установщик (слияние хуков на временных файлах)
+        run: python install.py --selftest
