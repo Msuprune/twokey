@@ -18,6 +18,7 @@
 import hashlib, hmac, html, json, os, re, secrets, select, socket, stat, sys, threading, time, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+VERSION = "0.5.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -51,7 +52,7 @@ def apply_settings():
     TG_ADMINS = {a.strip() for a in e("TG_ADMINS", "").split(",") if a.strip()}
     wait = int(e("GUARDIAN_TIMEOUT", "300") or 300)
     TIMEOUT = NO_LIMIT if wait == 0 else min(max(wait, 30), 900)
-    JUDGE = e("GUARDIAN_JUDGE", "risky")  # off | risky | all
+    JUDGE = e("GUARDIAN_JUDGE", "off")  # off | risky | all; без явного включения описание действия наружу не уходит
     PROVIDER = e("GUARDIAN_JUDGE_PROVIDER", "claude")  # claude | openai | command
     MODEL = e("GUARDIAN_MODEL", "") or ("claude-opus-5-5" if PROVIDER == "claude" else "")
     JUDGE_URL, JUDGE_KEY, JUDGE_CMD = e("GUARDIAN_JUDGE_URL", ""), e("GUARDIAN_JUDGE_KEY", ""), e("GUARDIAN_JUDGE_CMD", "")
@@ -1507,6 +1508,26 @@ def start_backup(rid):
     return True
 
 
+def send_card(rid, p):
+    """Карточка уходит в фоне: пока Telegram отвечает, решение из окна уже может дойти до агента."""
+    try:
+        sent = card_text(p)
+        msg = tg("sendMessage", chat_id=TG_CHAT_ID, text=sent, parse_mode="HTML", reply_markup={"inline_keyboard": p["rows"]})
+        p["msg_id"] = msg["message_id"]
+        if p["decision"] or card_text(p) != sent:
+            refresh_card(p)  # пока карточка летела, приняли решение или закончился бэкап
+    except Exception as e:
+        if panel_live():
+            log(f"Telegram недоступен ({e}) — ждём решения в панели")
+            return
+        with LOCK:
+            if p["decision"]:
+                return
+            PENDING.pop(rid, None)
+            p["tg_error"] = e
+        p["event"].set()
+
+
 def render(req, sev, found, ai):
     tool, inp = req.get("tool", "?"), req.get("input") or {}
     who = f"{tr('Агент')}: {esc(req['agent'])} · {tr('инструмент')}" if req.get("agent") else tr("инструмент").capitalize()
@@ -1553,7 +1574,7 @@ def resolve(rid, choice, who="", text=""):
 
 
 def ask_human(req, sev, found, ai, deadline, gone=None):
-    rid = secrets.token_hex(4)
+    rid = secrets.token_urlsafe(16)  # 128 бит: id карточки в кнопках Telegram не подобрать
     targets, wide = backup_targets(str(req.get("tool", "")), req.get("input") or {}, str(req.get("cwd") or ""))
     can_backup = BACKUP != "off" and bool(targets)
     p = {"event": threading.Event(), "decision": None, "text": render(req, sev, found, ai),
@@ -1582,41 +1603,40 @@ def ask_human(req, sev, found, ai, deadline, gone=None):
     if BACKUP == "auto" and can_backup:
         start_backup(rid)  # копия снимается, пока человек читает карточку
     if TG_TOKEN and TG_CHAT_ID:  # без Telegram решение ждём только в панели (decide() проверил, что она открыта)
-        try:
-            sent = card_text(p)
-            msg = tg("sendMessage", chat_id=TG_CHAT_ID, text=sent, parse_mode="HTML", reply_markup={"inline_keyboard": rows})
-            p["msg_id"] = msg["message_id"]
-            if card_text(p) != sent:
-                refresh_card(p)  # бэкап закончился, пока карточка летела в Telegram
-        except Exception as e:
-            if not panel_live():
-                with LOCK:
-                    PENDING.pop(rid, None)
-                return {"decision": "deny", "by": "error", "reason": tr(
-                    "TwoKey: не удалось связаться с Telegram ({e}). Действие заблокировано (fail-closed).").format(e=e)}
-            log(f"Telegram недоступен ({e}) — ждём решения в панели")
+        threading.Thread(target=send_card, args=(rid, p), daemon=True).start()
     while not p["event"].wait(min(1.0, max(0.0, deadline - time.monotonic()))):  # отсчёт от прихода запроса, а не после судьи
         if time.monotonic() >= deadline:
             resolve(rid, "t")
         elif gone and gone():  # агента прервали: иначе карточка без срока висела бы вечно, а кнопки уже ни на что не влияли
             resolve(rid, "c")
-    if p["decision"] in ("a", "w") and p.get("backup_job"):
-        p["backup_job"].wait(50)  # пропускаем, когда копия снята (не дольше 50 с: хук ждёт до TIMEOUT + 60)
+    if p.get("tg_error"):
+        return {"decision": "deny", "by": "error", "reason": tr(
+            "TwoKey: не удалось связаться с Telegram ({e}). Действие заблокировано (fail-closed).").format(e=p["tg_error"])}
+    # Пропускаем только после готовой копии. Ждём в пределах таймаута хука (TIMEOUT + 55), но не дольше 10 минут.
+    late = p["decision"] in ("a", "w") and p.get("backup_job") and not p["backup_job"].wait(
+        max(1.0, min(600.0, deadline + 50 - time.monotonic())))
     with LOCK:
         PENDING.pop(rid, None)
         for key in [k for k, (r, _) in AWAIT_TEXT.items() if r == rid]:
             del AWAIT_TEXT[key]
+    if late:
+        reason = tr("TwoKey: бэкап ещё не готов, поэтому действие не выполнено. Подождите и повторите его.")
+        p["closing"] = p.get("closing", "") + "\n⚠️ " + esc(reason)
+        refresh_card(p)
+        return {"decision": "deny", "by": "error", "reason": reason}
     choice = p["decision"]
     return {"decision": CHOICES[choice][0], "by": {"t": "timeout", "c": "gone"}.get(choice, "human"), "choice": tr(CHOICES[choice][1]),
             "reason": tr(REASONS[choice]).format(text=p.get("note", ""), timeout=TIMEOUT)}
 
 
 def authorized(chat, user):
-    return chat == TG_CHAT_ID and (not TG_ADMINS or user in TG_ADMINS)
+    if chat != TG_CHAT_ID:
+        return False  # в группе без списка админов кнопки не работают ни у кого: второй ключ не должен быть у всех участников
+    return user in TG_ADMINS if TG_ADMINS or chat.startswith("-") else True
 
 
 # ----------------------------------------------------------- команды бота ---
-BOT_COMMANDS = [("start", "Начать: покажу chat_id этого чата"), ("help", "Как работают кнопки и команды"),
+BOT_COMMANDS = [("start", "Начать: как подключить этот чат"), ("help", "Как работают кнопки и команды"),
                 ("status", "Состояние защиты"), ("templates", "Готовые шаблоны: включить или выключить"),
                 ("lang", "Язык: русский, English, қазақша"), ("panel", "Ссылка на окно TwoKey"),
                 ("always", "Что разрешено навсегда"), ("forget", "Отменить «всегда»: /forget <id>"),
@@ -1733,10 +1753,15 @@ def handle_update(u):
         cmd, _, arg = text.partition(" ")
         cmd = cmd.split("@")[0]  # в группах команда приходит как /forget@имя_бота
         if cmd == "/start":
-            LAST_START.update(chat=chat, name=msg["chat"].get("title") or msg.get("from", {}).get("first_name", ""),
-                              at=time.strftime("%H:%M"))
-            tg_safe("sendMessage", chat_id=chat, text=tr("TwoKey на связи. chat_id этого чата: {chat}").format(chat=chat)
-                    + "\n" + tr("Впишите его в окне TwoKey → Настройки → Telegram. Все команды: /help"))
+            if arg.strip():  # ссылка из окна TwoKey: чат получает код, но право решать — только после ввода кода в окне
+                name = msg["chat"].get("title") or msg.get("from", {}).get("first_name", "")
+                check = pair_offer(arg.strip(), chat, user, str(name)[:60])
+                tg_safe("sendMessage", chat_id=chat, text=tr(
+                    "Код подтверждения: {code}. Введите его в окне TwoKey. Никому его не пересылайте.").format(code=check) if check else tr(
+                    "Ссылка неверна или устарела. Получите новую: окно TwoKey → Настройки → Telegram."))
+                return
+            tg_safe("sendMessage", chat_id=chat, text=tr(
+                "TwoKey на связи. Чтобы подключить этот чат, откройте ссылку из окна TwoKey → Настройки → Telegram. Все команды: /help"))
             return
         if not text or not authorized(chat, user):
             return
@@ -1790,8 +1815,14 @@ def handle_update(u):
 
 
 def poll_forever():
-    offset = 0
+    offset, active = 0, ""
     while True:
+        if not TG_TOKEN:  # токен могут вписать в окне: бот оживёт без перезапуска сервера
+            time.sleep(2)
+            continue
+        if TG_TOKEN != active:
+            offset, active = 0, TG_TOKEN
+            threading.Thread(target=bot_setup, daemon=True).start()
         try:
             for u in tg("getUpdates", offset=offset, timeout=25, allowed_updates=["message", "callback_query"]):
                 offset = u["update_id"] + 1
@@ -1809,15 +1840,23 @@ def decide(req, gone=None):
         always = ALLOW.get(allow_key(req))
     if always and evaluate(tool, inp, cwd)[0] < CRITICAL and not command_leaks(tool, inp, cwd):  # правила строже или в git секрет — спросим
         res = {"decision": "allow", "by": "allowlist", "reason": "", "severity": "HIGH", "findings": [], "ai": None,
-               "choice": f"♾ Разрешено всегда ({always.get('who', '')}, {always.get('ts', '')})"}
+               "choice": tr("♾ Разрешено всегда ({who}, {ts})").format(who=always.get("who", ""), ts=always.get("ts", ""))}
         audit(req, res)
         return res
     sev, found, ai = assess(tool, inp, cwd)
     if sev < HIGH:
         res = {"decision": "allow", "by": "rules", "reason": ""}
     elif not (TG_TOKEN and TG_CHAT_ID) and not panel_live():
-        res = {"decision": "ask", "by": "rules",
-               "reason": tr("TwoKey: опасное действие — {why}. Подтвердите вручную.").format(why="; ".join(tr(f["why"]) for f in found))}
+        reason = tr("TwoKey: опасное действие — {why}. Подтвердите вручную.").format(why="; ".join(tr(f["why"]) for f in found))
+        targets = backup_targets(tool, inp, cwd)[0] if BACKUP == "auto" else []
+        if targets:  # человек подтвердит в самом агенте, поэтому копию снимаем до вопроса
+            try:
+                line = backup_lines(make_backup(secrets.token_hex(4), req, targets))[1]
+                audit(req, {"decision": "backup", "by": "twokey", "reason": line})
+            except Exception as e:
+                line = "💾 " + tr("Бэкап не получился: {e}").format(e=esc(e, 200))
+            reason += "\n" + line
+        res = {"decision": "ask", "by": "rules", "reason": reason}
     else:
         res = ask_human(req, sev, found, ai, deadline, gone)
     res.update(severity=LEVELS[sev], findings=[f["why"] for f in found], ai=(ai or {}).get("summary"))
@@ -1889,7 +1928,83 @@ SETTINGS = {
     "GUARDIAN_BACKUP": lambda v: v in ("auto", "ask", "off"),
 }
 SECRET_SETTINGS = {"TG_TOKEN", "GUARDIAN_JUDGE_KEY"}
-LAST_START = {}  # кто последним написал боту /start — подсказка для chat_id в настройках
+
+# Привязка чата. Кто решает за агента, задаёт только человек у окна TwoKey: одноразовая ссылка (256 бит, 5 минут) →
+# бот присылает в открывший её чат код из 6 цифр → человек вводит код в окне. Ссылка без кода и код без окна ничего не дают.
+# Ссылки и коды в открытом виде не храним: только HMAC с ключом, который живёт в памяти процесса.
+PAIR_TTL, PAIR_TRIES = 300, 5
+PAIR_KEY = secrets.token_bytes(32)
+PAIR = {}
+
+
+def pair_digest(value):
+    return hmac.new(PAIR_KEY, value.encode(), hashlib.sha256).digest()
+
+
+def pair_view():
+    """Состояние для окна; секреты окно не получает."""
+    with LOCK:
+        if PAIR and time.monotonic() >= PAIR["exp"]:
+            PAIR.clear()
+        c = PAIR.get("candidate")
+        return {"waiting": "link" in PAIR, "candidate": {k: c[k] for k in ("chat", "name")} if c else None}
+
+
+def pair_start():
+    if not TG_TOKEN:
+        raise ValueError("Сначала сохраните токен бота")
+    bot = tg("getMe")["username"]
+    code = secrets.token_urlsafe(32)
+    with LOCK:
+        PAIR.clear()
+        PAIR.update(link=pair_digest(code), exp=time.monotonic() + PAIR_TTL)
+    return {"private": f"https://t.me/{bot}?start={code}", "group": f"https://t.me/{bot}?startgroup={code}", "pair": pair_view()}
+
+
+def pair_offer(code, chat, user, name):
+    """Бот получил /start с кодом из ссылки. Ссылка срабатывает один раз; вернёт код подтверждения для этого чата."""
+    with LOCK:
+        if "link" not in PAIR or time.monotonic() >= PAIR["exp"] or not hmac.compare_digest(PAIR["link"], pair_digest(code)):
+            return None
+        check = f"{secrets.randbelow(10**6):06d}"
+        PAIR.clear()
+        PAIR.update(exp=time.monotonic() + PAIR_TTL, tries=0, check=pair_digest(check),
+                    candidate={"chat": chat, "user": user, "name": name})
+    return check
+
+
+def pair_finish(code):
+    """Человек ввёл в окне код из Telegram: только теперь этот чат получает право решать."""
+    with LOCK:
+        c = PAIR.get("candidate") if PAIR and time.monotonic() < PAIR["exp"] else None
+        if not c:
+            PAIR.clear()
+            raise ValueError("Запрос на подключение устарел. Получите новую ссылку.")
+        if not hmac.compare_digest(PAIR["check"], pair_digest(re.sub(r"\D", "", code))):
+            PAIR["tries"] += 1
+            if PAIR["tries"] >= PAIR_TRIES:
+                PAIR.clear()
+                raise ValueError("Слишком много неверных попыток. Получите новую ссылку.")
+            raise ValueError("Неверный код. Проверьте сообщение бота.")
+        PAIR.clear()
+    save_settings({"TG_CHAT_ID": c["chat"], "TG_ADMINS": c["user"] if c["chat"].startswith("-") else ""})
+    audit_event(f"Telegram: подключён чат {c['chat']}")
+    tg_safe("sendMessage", chat_id=c["chat"], text=tr("✅ Чат подключён к TwoKey. Сюда будут приходить опасные действия агента."))
+
+
+def api_pair_start(b):
+    return pair_start()
+
+
+def api_pair_finish(b):
+    pair_finish(str(b.get("code", "")))
+    return settings_view()
+
+
+def api_pair_cancel(b):
+    with LOCK:
+        PAIR.clear()
+    return {"pair": pair_view()}
 
 
 def save_settings(changes):
@@ -1898,6 +2013,8 @@ def save_settings(changes):
     bad = [k for k, v in changes.items() if k not in SETTINGS or re.search(r"[\x00-\x1f]", v) or not SETTINGS[k](v)]
     if bad or not changes:
         raise ValueError("Неверные значения: " + ", ".join(bad) if bad else "Нечего сохранять")
+    if changes.get("TG_CHAT_ID", TG_CHAT_ID).startswith("-") and not re.search(r"\d", changes.get("TG_ADMINS", ",".join(TG_ADMINS))):
+        raise ValueError("Для группы впишите id тех, кто может решать: иначе кнопки в ней работать не будут.")
     with LOCK:
         try:
             with open(ENV_PATH, encoding="utf-8-sig") as f:
@@ -2007,9 +2124,9 @@ def settings_view():
         sdk = importlib.util.find_spec("anthropic") is not None
     except (ImportError, ValueError):
         sdk = False
-    return {"values": values, "secret_set": {k: bool(e(k)) for k in SECRET_SETTINGS}, "home": HERE, "python": sys.executable,
+    return {"version": VERSION, "values": values, "secret_set": {k: bool(e(k)) for k in SECRET_SETTINGS}, "home": HERE, "python": sys.executable,
             "hook": hook_status(), "claude": claude_versions(), "autostart": os.path.exists(STARTUP_LNK),
-            "autostart_supported": os.name == "nt", "last_start": dict(LAST_START), "anthropic_sdk": sdk,
+            "autostart_supported": os.name == "nt", "pair": pair_view(), "anthropic_sdk": sdk,
             "telegram": bool(TG_TOKEN and TG_CHAT_ID)}
 
 
@@ -2029,7 +2146,7 @@ def api_test_telegram(b):
         with urllib.request.urlopen(req, timeout=15) as r:
             me = json.load(r)["result"]
         if b.get("send") and chat:
-            data = json.dumps({"chat_id": chat, "text": "✅ TwoKey: связь с ботом работает"}).encode()
+            data = json.dumps({"chat_id": chat, "text": tr("✅ TwoKey: связь с ботом работает")}).encode()
             urllib.request.urlopen(urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data,
                                                           headers={"Content-Type": "application/json"}), timeout=15).close()
     except Exception as e:  # токен в ошибке не показываем
@@ -2197,14 +2314,15 @@ API = {"/api/check": api_check, "/api/test-pattern": api_test_pattern, "/api/rul
        "/api/rules/toggle": api_toggle, "/api/rules/delete": api_delete_custom, "/api/allow/delete": api_forget,
        "/api/decide": api_decide, "/api/settings/save": api_settings_save, "/api/settings/test-telegram": api_test_telegram,
        "/api/settings/test-judge": api_test_judge, "/api/settings/autostart": api_autostart, "/api/shutdown": api_shutdown,
-       "/api/templates/toggle": api_template_toggle}
+       "/api/templates/toggle": api_template_toggle, "/api/telegram/pair": api_pair_start,
+       "/api/telegram/pair/finish": api_pair_finish, "/api/telegram/pair/cancel": api_pair_cancel}
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/health":
-            return self.reply(200, {"ok": True, "telegram": bool(TG_TOKEN and TG_CHAT_ID), "judge": JUDGE,
+            return self.reply(200, {"ok": True, "version": VERSION, "telegram": bool(TG_TOKEN and TG_CHAT_ID), "judge": JUDGE,
                                     "pending": len(PENDING), "home": HOME_DIR})
         if not self.local_origin():
             return self.reply(403, {"error": "панель открывается только с этого компьютера"})
@@ -2260,6 +2378,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, API[path](b))
         except ValueError as e:
             self.reply(400, {"error": str(e)})
+        except Exception as e:  # сбой записи настроек или автозапуска: показать причину, а не оборвать соединение
+            self.reply(500, {"error": mask(str(e))[:200]})
 
     def client_gone(self):
         """Хук закрыл соединение: агента прервали или среда агента сняла хук по таймауту."""
@@ -2350,17 +2470,16 @@ def serve(no_browser=False):
     global UI_TOKEN, SERVER
     UI_TOKEN = secrets.token_urlsafe(24)
     if TG_CHAT_ID.startswith("-") and not TG_ADMINS:
-        sys.exit("TG_CHAT_ID — группа: задайте TG_ADMINS (id тех, кто может решать), иначе решать сможет любой участник.")
+        log("Telegram: чат — группа, но список админов пуст. Кнопки в ней не работают, пока вы не впишете id в Настройках.")
     try:
         srv = Server((HOST, PORT), Handler)
     except OSError as e:
-        sys.exit(f"Порт {PORT} занят ({e}). TwoKey уже запущен? Закройте старое окно сервера и запустите снова.")
-    if TG_TOKEN:  # бота опрашиваем, только когда порт наш: иначе две копии делили бы нажатия кнопок
-        threading.Thread(target=poll_forever, daemon=True).start()
-        threading.Thread(target=bot_setup, daemon=True).start()
+        log(f"Порт {PORT} занят ({e}). TwoKey уже запущен? Закройте старое окно сервера и запустите снова.")
+        sys.exit(1)
+    threading.Thread(target=poll_forever, daemon=True).start()  # только когда порт наш: иначе две копии делили бы нажатия кнопок
     if not (TG_TOKEN and TG_CHAT_ID):
         log("Telegram не настроен: опасные действия придут в панель, если она открыта, иначе — в локальное подтверждение. "
-            "Напишите боту /start — он пришлёт chat_id.")
+            "Подключите чат: окно TwoKey → Настройки → Telegram.")
     SERVER = srv
     refresh_ticket_file()
     url = panel_link()
@@ -2431,15 +2550,21 @@ def _hook():
         return  # быстрый путь: безопасное действие, ноль задержки
     req = {"tool": tool, "input": inp, "cwd": cwd, "session": ev.get("session_id", "")}
     try:
-        res = post(URL, req, timeout=TIMEOUT + 30)
+        res = post(URL, req, timeout=TIMEOUT + 55)
         if res.get("home") != HOME_DIR:  # на порту другая копия TwoKey (например, из репозитория) — ей не верим
             raise OSError(f"на порту {PORT} отвечает другая копия TwoKey ({res.get('home') or 'неизвестно откуда'})")
     except Exception as e:
-        if sev < HIGH:
+        if sev < HIGH and not git_send:
             return
-        res = {"decision": "deny", "by": "offline", "reason": tr(
-            "TwoKey недоступен ({e}). Опасное действие заблокировано (fail-closed): {why}. Запустите TwoKey ярлыком TwoKey.").format(
-            e=e, why="; ".join(tr(f["why"]) for f in found))}
+        how = tr("Запустите TwoKey ярлыком TwoKey.") if os.name == "nt" else tr("Запустите TwoKey: python3 {path}").format(
+            path=os.path.join(HERE, "app.pyw"))
+        if sev < HIGH:  # что именно уходит в git, смотрит только сервер: без него решает человек
+            res = {"decision": "ask", "by": "offline", "reason": tr(
+                "TwoKey недоступен ({e}): секреты в этом git commit/push не проверены. Подтвердите вручную. {how}").format(e=e, how=how)}
+        else:
+            res = {"decision": "deny", "by": "offline", "reason": tr(
+                "TwoKey недоступен ({e}). Опасное действие заблокировано (fail-closed): {why}. {how}").format(
+                e=e, why="; ".join(tr(f["why"]) for f in found), how=how)}
     out = hook_output(res)
     if out:
         print(json.dumps(out))
@@ -2476,7 +2601,7 @@ def demo():
         if sev >= HIGH:
             print("   … ждём решения в Telegram")
         try:
-            res = post(URL, {"tool": tool, "input": inp, "agent": "demo-agent"}, timeout=TIMEOUT + 30)
+            res = post(URL, {"tool": tool, "input": inp, "agent": "demo-agent"}, timeout=TIMEOUT + 55)
         except OSError as e:
             sys.exit(f"Сервер TwoKey не отвечает ({e}). Сначала запустите в другом окне: python guardian.py serve")
         print(f"   → {res.get('choice') or res['decision']}  {res.get('reason', '')[:160]}")
@@ -2499,6 +2624,7 @@ def bench(path):
     for title, items in (("ПРОПУЩЕНО", misses), ("ЛОЖНАЯ ТРЕВОГА", fps)):
         for r in items:
             print(f"  {title}: {r['tool']} {shown(r['input'])[:110]}")
+    sys.exit(1 if misses or fps else 0)  # иначе CI останется зелёным при падении точности
 
 
 def log(msg):
@@ -2669,6 +2795,7 @@ def selftest():
                 assert "/forget" in tr(HELP)  # команды в переводе не тронуты
         finally:
             LANG = saved_lang
+    assert '"permissionDecision": "ask"' in run_hook("http://127.0.0.1:1/check", "git commit -m x")  # сервера нет: секреты не проверены
     assert hook_output({"decision": "allow", "by": "rules"}) is None
     assert hook_output({"decision": "allow", "by": "human"}) is None  # «allow» хук не выдаёт никогда
     assert hook_output({"decision": "deny", "reason": "x"})["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -3028,6 +3155,39 @@ def selftest():
         assert r["decision"] == "deny" and r["by"] == "timeout", r
         texts = [p["text"] for m, p in sent if m == "sendMessage" and "parse_mode" in p]
         assert texts and all("TwoKey · риск" in t and "inline_keyboard" not in t for t in texts)
+        TIMEOUT = 5  # медленный Telegram не задерживает решение из окна, а карточка всё равно получает итог
+        gate, real_tg, mark, out = threading.Event(), tg, len(sent), {}
+        tg = lambda method, **p: (gate.wait(5) if method == "sendMessage" else None, real_tg(method, **p))[1]
+        drop = {"tool": "Bash", "input": {"command": "DROP TABLE users"}}
+        t = threading.Thread(target=lambda: out.update(decide(drop)))
+        t.start()
+        while not PENDING:
+            time.sleep(0.01)
+        assert resolve(next(iter(PENDING)), "d")
+        t.join(2)
+        assert out.get("decision") == "deny" and not sent[mark:], out
+        gate.set()
+        closed = lambda: any(m == "editMessageText" and tr("Решение:") in p["text"] for m, p in sent[mark:])
+        stop = time.monotonic() + 3
+        while not closed() and time.monotonic() < stop:
+            time.sleep(0.01)
+        assert closed(), sent[mark:]
+
+        def broken(method, **p):
+            raise OSError("нет сети")
+        tg = broken  # Telegram упал и окно закрыто: отказ, а не вечное ожидание
+        r = decide(drop)
+        assert r["decision"] == "deny" and r["by"] == "error" and not PENDING, r
+        tg, out = real_tg, {}  # копия не успела: действие не выполняем
+        t = threading.Thread(target=lambda: out.update(decide(drop)))
+        t.start()
+        while not PENDING:
+            time.sleep(0.01)
+        rid = next(iter(PENDING))
+        PENDING[rid]["backup_job"] = type("Late", (), {"wait": lambda self, timeout=None: False})()
+        resolve(rid, "a")
+        t.join(3)
+        assert out.get("decision") == "deny" and "бэкап" in out.get("reason", ""), out
         TG_TOKEN = ""  # без Telegram опасное уходит в локальное подтверждение
         assert decide({"tool": "Bash", "input": {"command": "DROP TABLE users"}})["decision"] == "ask"
         srv = Server(("127.0.0.1", 0), Handler)
@@ -3139,6 +3299,54 @@ def selftest():
             v = json.loads(body)["values"]
             assert code == 200 and "B" * 10 not in v["TG_TOKEN"] and v["GUARDIAN_TIMEOUT"] == "120", v  # токен скрыт
             assert call("/api/settings", token="bad")[0] == 401
+            assert call("/api/settings/save", {"TG_CHAT_ID": "-100", "TG_ADMINS": ""})[0] == 400  # группа без админов
+            assert call("/api/settings/save", {"TG_CHAT_ID": "-100", "TG_ADMINS": "7"})[0] == 200
+            assert authorized("-100", "7") and not authorized("-100", "8")
+            os.environ["TG_ADMINS"] = ""
+            apply_settings()
+            assert not authorized("-100", "7")  # даже если .env поправили руками
+
+            # привязка чата: ссылка одноразовая, чужой /start ничего не даёт, право решать — только после кода в окне
+            saved_tg, pair_sent = tg, []
+            os.environ["TG_TOKEN"] = "x"  # сохранение настроек перечитывает окружение
+            apply_settings()
+            tg = lambda m, **p: pair_sent.append((m, p)) or ({"username": "tkbot"} if m == "getMe" else {"message_id": 1})
+            start = lambda code, chat, user: handle_update({"message": {"text": f"/start {code}".strip(), "chat": {"id": chat},
+                                                                        "from": {"id": user, "first_name": "N"}}})
+            digits = lambda: re.search(r"\b\d{6}\b", pair_sent[-1][1]["text"]).group(0)
+            before = TG_CHAT_ID
+            start("", 666, 666)
+            assert TG_CHAT_ID == before and not pair_view()["candidate"]
+            code, body = call("/api/telegram/pair", {})
+            link = json.loads(body)["private"]
+            secret = link.rpartition("=")[2]
+            assert code == 200 and len(secret) >= 43 and secret not in json.dumps(PAIR, default=str) and pair_view()["waiting"]
+            start("x" * 43, 666, 666)
+            assert "candidate" not in PAIR and TG_CHAT_ID == before
+            start(secret, 555, 555)
+            first = digits()
+            assert pair_view()["candidate"]["chat"] == "555" and TG_CHAT_ID == before  # без кода в окне чат ещё не подключён
+            start(secret, 666, 666)  # повтор ссылки
+            assert pair_view()["candidate"]["chat"] == "555"
+            wrong = "000000" if first != "000000" else "111111"
+            assert call("/api/telegram/pair/finish", {"code": wrong})[0] == 400 and TG_CHAT_ID == before
+            assert call("/api/telegram/pair/finish", {"code": first})[0] == 200 and TG_CHAT_ID == "555" and not PAIR
+            assert call("/api/telegram/pair/finish", {"code": first})[0] == 400  # код одноразовый
+            secret = json.loads(call("/api/telegram/pair", {})[1])["group"].rpartition("=")[2]
+            start(secret, -200, 77)
+            first = digits()
+            for _ in range(PAIR_TRIES):
+                assert call("/api/telegram/pair/finish", {"code": "000000" if first != "000000" else "111111"})[0] == 400
+            assert not PAIR and call("/api/telegram/pair/finish", {"code": first})[0] == 400 and TG_CHAT_ID == "555"
+            secret = json.loads(call("/api/telegram/pair", {})[1])["group"].rpartition("=")[2]
+            start(secret, -200, 77)
+            assert call("/api/telegram/pair/finish", {"code": digits()})[0] == 200
+            assert TG_CHAT_ID == "-200" and authorized("-200", "77") and not authorized("-200", "78")
+            secret = json.loads(call("/api/telegram/pair", {})[1])["private"].rpartition("=")[2]
+            PAIR["exp"] = time.monotonic() - 1  # устаревшая ссылка
+            start(secret, 666, 666)
+            assert not pair_view()["candidate"] and not PAIR
+            tg = saved_tg
         finally:
             ENV_PATH = saved_env
             os.environ.clear()

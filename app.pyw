@@ -24,8 +24,10 @@ def ensure_server():
     if h:
         return h
     flags = 0x08000000 | 0x00000008 if os.name == "nt" else 0  # CREATE_NO_WINDOW | DETACHED_PROCESS
-    subprocess.Popen([g.pythonw(), os.path.join(HERE, "guardian.py"), "serve", "--no-browser"], cwd=HERE, creationflags=flags,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    with open(os.path.join(HERE, "server.log"), "a", encoding="utf-8") as logfile:  # причина сбоя запуска останется в журнале
+        subprocess.Popen([g.pythonw(), os.path.join(HERE, "guardian.py"), "serve", "--no-browser"], cwd=HERE, creationflags=flags,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=logfile, close_fds=True,
+                         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     for _ in range(75):
         time.sleep(0.2)
         h = health()
@@ -83,12 +85,12 @@ def fail(text):
 def main():
     h = ensure_server()
     if not h:
-        fail(f"Сервер TwoKey не запустился. Подробности: {os.path.join(HERE, 'server.log')}")
+        fail(g.tr("Сервер TwoKey не запустился. Подробности: {path}").format(path=os.path.join(HERE, "server.log")))
     if h.get("home") != g.HOME_DIR:
-        fail(f"На порту {g.PORT} работает другая копия TwoKey ({h.get('home')}). Закройте её и запустите снова.")
+        fail(g.tr("На порту {port} работает другая копия TwoKey ({home}). Закройте её и запустите снова.").format(port=g.PORT, home=h.get("home")))
     ticket = read_ticket()
     if not ticket:
-        fail("Не удалось получить доступ к панели. Перезапустите TwoKey.")
+        fail(g.tr("Не удалось получить доступ к панели. Перезапустите TwoKey."))
     open_window(f"http://127.0.0.1:{g.PORT}/#ticket={ticket}")
 
 

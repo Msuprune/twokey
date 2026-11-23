@@ -10,7 +10,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python: ["3.10", "3.12", "3.13"]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.x"]  # 3.x — свежий стабильный: его и скачает новый пользователь
     runs-on: ${{ matrix.os }}
     env:
       PYTHONIOENCODING: utf-8
@@ -22,6 +22,7 @@ jobs:
       - name: Самопроверка
         run: python guardian.py test
       - name: Точность правил (ред-тим и слепой набор)
+        shell: bash  # на Windows иначе учитывался бы код только последней команды
         run: |
           python guardian.py bench tests/bench.jsonl
           python guardian.py bench tests/holdout_danger.jsonl
@@ -31,3 +32,9 @@ jobs:
         run: python tools/i18n.py check
       - name: Установщик (слияние хуков на временных файлах)
         run: python install.py --selftest
+      - name: Настоящая установка во временную папку и блокировка хуком
+        shell: bash
+        run: |
+          python install.py --yes --no-start --no-shortcuts --home "$RUNNER_TEMP/tk" --claude-settings "$RUNNER_TEMP/agent-settings.json"
+          python -c "import guardian as g, json; t, i = g.DEMO[4]; print(json.dumps({'tool_name': t, 'tool_input': i, 'cwd': '.'}))" \
+            | python -I -S "$RUNNER_TEMP/tk/hook.py" | grep -q '"permissionDecision": "deny"'

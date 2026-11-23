@@ -293,9 +293,10 @@ legend { font-weight: 600; padding: 0 6px; }
           </label>
           <label class="field"><span>chat_id</span>
             <input type="text" name="TG_CHAT_ID" inputmode="numeric" spellcheck="false">
-            <span class="small" id="chat-hint"></span>
+            <span class="muted small">Заполнится само после подключения чата</span>
           </label>
         </div>
+        <div class="field" id="pair-box" aria-live="polite"></div>
         <label class="field"><span>Кто может решать <span class="muted small">(для группового чата: id через запятую)</span></span>
           <input type="text" name="TG_ADMINS" spellcheck="false">
         </label>
@@ -738,7 +739,7 @@ async function loadSettings() {
   }
   sform.GUARDIAN_TIMEOUT.dataset.loaded = sform.GUARDIAN_TIMEOUT.value;
   $('#autostart').checked = settings.autostart; $('#autostart').disabled = !settings.autostart_supported;
-  updateTimeout(); updateProvider(); renderSystem(); chatHint();
+  updateTimeout(); updateProvider(); renderSystem(); renderPair();
 }
 
 function updateTimeout() {
@@ -769,11 +770,49 @@ function updateProvider() {
 }
 sform.GUARDIAN_JUDGE_PROVIDER.addEventListener('change', updateProvider);
 
-function chatHint() {
-  const box = $('#chat-hint'), s = settings.last_start;
-  if (!s || !s.chat) { box.replaceChildren(h('span', { class: 'muted' }, 'Напишите боту /start — chat_id появится здесь')); return; }
-  box.replaceChildren(fill('Последний /start: {name} ({chat})', { name: s.name || tr('чат'), chat: s.chat }) + ' ',
-    h('button', { type: 'button', class: 'btn ghost', onclick: () => { sform.TG_CHAT_ID.value = s.chat; } }, 'Подставить'));
+let pairLinks = null, pairShown = '';  // ссылки живут только в памяти этой вкладки
+const pairFail = err => { if (err.message !== 'token') toast(err.message, true); };
+async function pairStart() {
+  try { pairLinks = await api('/api/telegram/pair', {}); settings.pair = pairLinks.pair; renderPair(); } catch (err) { pairFail(err); }
+}
+async function pairCancel() {
+  try { settings.pair = (await api('/api/telegram/pair/cancel', {})).pair; pairLinks = null; renderPair(); } catch (err) { pairFail(err); }
+}
+async function pairRefresh() {
+  try {
+    const s = (await api('/api/settings')).pair;
+    if (JSON.stringify(s) !== JSON.stringify(settings.pair)) { settings.pair = s; renderPair(); }
+  } catch {}
+}
+function renderPair() {
+  const box = $('#pair-box'), p = settings.pair || {};
+  if (!p.waiting) pairLinks = p.candidate ? pairLinks : null;
+  const key = JSON.stringify([p, !!pairLinks, settings.telegram]);
+  if (key === pairShown && box.childElementCount) return;  // не стираем код, который человек уже вводит
+  pairShown = key;
+  const cancel = () => h('button', { type: 'button', class: 'btn ghost', onclick: pairCancel }, 'Отмена');
+  if (p.candidate) {
+    const input = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '7', 'aria-label': 'Код из Telegram', placeholder: '123456' });
+    const send = async () => {
+      try { settings = await api('/api/telegram/pair/finish', { code: input.value }); pairLinks = null; toast('Чат подключён'); loadSettings(); refresh(); }
+      catch (err) { pairFail(err); input.value = ''; pairRefresh(); }
+    };
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); send(); } });
+    box.replaceChildren(h('span', {}, fill('Запрос от чата «{name}» ({chat}). Введите код, который бот прислал в этот чат:', { name: p.candidate.name || tr('чат'), chat: p.candidate.chat })),
+      input, h('div', { class: 'actions' }, h('button', { type: 'button', class: 'btn', onclick: send }, 'Подключить'), cancel()),
+      h('span', { class: 'muted small' }, 'Если это не ваш чат, нажмите «Отмена».'));
+    input.focus();
+    return;
+  }
+  if (p.waiting && pairLinks) {
+    const link = (href, text) => h('a', { class: 'btn', href, target: '_blank', rel: 'noopener noreferrer' }, text);
+    box.replaceChildren(h('span', {}, 'Откройте ссылку в Telegram. Она сработает один раз и действует 5 минут.'),
+      h('div', { class: 'actions' }, link(pairLinks.private, 'Личный чат'), link(pairLinks.group, 'Группа'),
+        h('button', { type: 'button', class: 'btn ghost', onclick: async () => { try { await navigator.clipboard.writeText(pairLinks.private); toast('Ссылка скопирована'); } catch { toast('Не удалось скопировать', true); } } }, 'Скопировать'), cancel()));
+    return;
+  }
+  box.replaceChildren(h('div', { class: 'actions' }, h('button', { type: 'button', class: 'btn', onclick: pairStart }, settings.telegram ? 'Подключить другой чат' : 'Подключить чат')),
+    h('span', { class: 'muted small' }, 'Одноразовая ссылка и код подтверждения: чужой чат подключиться не сможет.'));
 }
 
 function renderSystem() {
@@ -783,6 +822,7 @@ function renderSystem() {
     tr(hk.on_failure === 'block' ? 'при сбое блокирует' : 'без onFailure — при сбое пропустит') : tr('не подключён — запустите установщик'), hk.installed && hk.ours ? 'result good' : 'result bad');
   const old = cv.cli && verLess(cv.cli, '2.1.295');
   add('Версия агента', [cv.desktop ? fill('приложение {v}', { v: cv.desktop }) : '', cv.cli ? `CLI ${cv.cli}` + (old ? ' — ' + tr('устарел, обновите: claude update') : '') : ''].filter(Boolean).join(' · ') || tr('не найден'), old ? 'result bad' : '');
+  add('Версия TwoKey', settings.version);
   add('Python', settings.python);
   add('Папка TwoKey', settings.home);
   $('#sysinfo').replaceChildren(...rows);
@@ -872,6 +912,7 @@ login().then(() => {
   loadSettings();
   setInterval(refresh, 2000);
   $('#tab-settings').addEventListener('click', loadSettings);
+  setInterval(() => { if (!document.hidden && (settings?.pair?.waiting || settings?.pair?.candidate)) pairRefresh(); }, 2000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 });
 </script>

@@ -12,7 +12,7 @@ import json, os, re, shutil, subprocess, sys, threading, time
 SRC = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.join(os.path.expanduser("~"), ".twokey")  # рабочая копия: агенту сюда нельзя ни писать, ни заглядывать
 CLAUDE_SETTINGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude"), "settings.json")
-FILES = ["guardian.py", "hook.py", "ui.html", "app.pyw", "templates.json", "i18n.json", "icon.ico", "icon.png"]
+FILES = ["guardian.py", "hook.py", "install.py", "ui.html", "app.pyw", "templates.json", "i18n.json", "icon.ico", "icon.png"]
 HOOK_TIMEOUT = 21 * 86400 + 60  # режим «без ограничений» (guardian.NO_LIMIT) + запас 60 с; сколько ждать, решает сервер
 NEED_CC = (2, 1, 295)  # с этой версии агент понимает onFailure: "block"
 
@@ -30,7 +30,7 @@ T = {
         other="⚠ На порту работает другая копия TwoKey ({}) — закройте её",
         old="⚠ Работает старая версия сервера TwoKey — закройте её окно (Ctrl+C) и откройте TwoKey ярлыком",
         done="Готово! TwoKey установлен.",
-        done_rm="Готово. Хук и ярлыки убраны, папка {} осталась — её можно удалить вручную.", err="✗ Ошибка: {}",
+        done_rm="Готово. Хук и ярлыки убраны. Папка {} осталась: в ней токен бота, журнал и бэкапы (до 2 ГБ). Если они не нужны, удалите её вручную.", err="✗ Ошибка: {}",
         py_old="Нужен Python 3.10 или новее", confirm_rm="Отключить защиту TwoKey и убрать ярлыки?",
         stopping="↻ Останавливаю сервер TwoKey…", old_rm="⚠ Работает старая версия сервера TwoKey — закройте её окно (Ctrl+C)",
         hook_none="• Хука TwoKey в {} не нашлось — отключать нечего",
@@ -50,7 +50,7 @@ T = {
         other="⚠ Another TwoKey copy is running on the port ({}) — close it",
         old="⚠ An old TwoKey server version is running — close its window (Ctrl+C) and open TwoKey from the shortcut",
         done="Done! TwoKey is installed.",
-        done_rm="Done. Hook and shortcuts removed; folder {} is kept — delete it by hand if you like.", err="✗ Error: {}",
+        done_rm="Done. Hook and shortcuts removed. Folder {} is kept: it holds the bot token, the log and backups (up to 2 GB). Delete it by hand if you don't need them.", err="✗ Error: {}",
         py_old="Python 3.10 or newer is required", confirm_rm="Turn off TwoKey protection and remove shortcuts?",
         stopping="↻ Stopping the TwoKey server…", old_rm="⚠ An old TwoKey server version is running — close its window (Ctrl+C)",
         hook_none="• No TwoKey hook found in {} — nothing to disconnect",
@@ -70,7 +70,7 @@ T = {
         other="⚠ Портта TwoKey-дің басқа көшірмесі жұмыс істеп тұр ({}) — оны жабыңыз",
         old="⚠ TwoKey серверінің ескі нұсқасы жұмыс істеп тұр — оның терезесін жабыңыз (Ctrl+C), содан кейін TwoKey-ді белгішеден ашыңыз",
         done="Дайын! TwoKey орнатылды.",
-        done_rm="Дайын. Хук пен белгішелер жойылды, {} қалтасы қалды — оны қолмен жоюға болады.", err="✗ Қате: {}",
+        done_rm="Дайын. Хук пен белгішелер жойылды. {} қалтасы қалды: онда бот токені, журнал және бэкаптар (2 ГБ-қа дейін) сақталады. Қажет болмаса, оны қолмен жойыңыз.", err="✗ Қате: {}",
         py_old="Python 3.10 немесе жаңарақ нұсқасы керек", confirm_rm="TwoKey қорғанысын өшіріп, белгішелерді жою керек пе?",
         stopping="↻ TwoKey серверін тоқтатамын…", old_rm="⚠ TwoKey серверінің ескі нұсқасы жұмыс істеп тұр — оның терезесін жабыңыз (Ctrl+C)",
         hook_none="• {} ішінде TwoKey хугы табылмады — ажырататын ештеңе жоқ",
