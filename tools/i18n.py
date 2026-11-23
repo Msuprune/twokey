@@ -25,6 +25,10 @@ def strings():
         if isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant):
             if getattr(node.func, "id", getattr(node.func, "attr", "")) in ("tr", "ValueError"):
                 add(node.args[0].value)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "add" and len(node.args) >= 4:  # находки в evaluate()
+            for a in node.args[2:4]:
+                if isinstance(a, ast.Constant):
+                    add(a.value)
     for _, _, _, _, why, fix in g.BUILTIN:
         add(why), add(fix)
     for s in g.RU + [v[1] for v in g.CHOICES.values()] + list(g.REASONS.values()) + [g.HELP, g.BOT_ABOUT, g.BOT_SHORT]:

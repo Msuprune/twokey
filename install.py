@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Установщик TwoKey: рабочая копия, защита Claude Code, ярлыки «TwoKey» и автозапуск.
+"""Установщик TwoKey: рабочая копия, защита агента, ярлыки «TwoKey» и автозапуск.
 
   python install.py               окно установщика
   python install.py --yes         установить без окна (настройки по умолчанию)
@@ -12,9 +12,9 @@ import json, os, re, shutil, subprocess, sys, threading, time
 SRC = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.join(os.path.expanduser("~"), ".twokey")  # рабочая копия: агенту сюда нельзя ни писать, ни заглядывать
 CLAUDE_SETTINGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude"), "settings.json")
-FILES = ["guardian.py", "hook.py", "ui.html", "app.pyw", "templates.json", "i18n.json"]
-HOOK_TIMEOUT = 960  # максимум ожидания человека (900 с) + запас 60 с
-NEED_CC = (2, 1, 295)  # с этой версии Claude Code понимает onFailure: "block"
+FILES = ["guardian.py", "hook.py", "ui.html", "app.pyw", "templates.json", "i18n.json", "icon.ico", "icon.png"]
+HOOK_TIMEOUT = 21 * 86400 + 60  # режим «без ограничений» (guardian.NO_LIMIT) + запас 60 с; сколько ждать, решает сервер
+NEED_CC = (2, 1, 295)  # с этой версии агент понимает onFailure: "block"
 
 T = {
     "ru": dict(
@@ -23,19 +23,19 @@ T = {
         auto="Запускать вместе с Windows", open="Открыть TwoKey после установки", folder="Папка: {}",
         install="Установить", update="Обновить", remove="Удалить", close="Закрыть",
         copy="✓ Программа скопирована в {}", env_new="✓ Создан файл настроек .env", env_keep="✓ Настройки сохранены (.env не тронут)",
-        hook_ok="✓ Защита подключена к Claude Code ({})", hook_gone="✓ Защита отключена от Claude Code",
-        cc_old="⚠ Claude Code CLI {} не знает onFailure — при сбое хука действие пройдёт. Обновите: claude update",
-        cc_ok="✓ Claude Code: {}", lnk="✓ Ярлык: {}", lnk_gone="✓ Ярлыки убраны", auto_on="✓ Автозапуск включён",
+        hook_ok="✓ Защита подключена ({})", hook_gone="✓ Защита отключена",
+        cc_old="⚠ Версия агента {} не знает onFailure — при сбое хука действие пройдёт. Обновите: claude update",
+        cc_ok="✓ Версия агента: {}", lnk="✓ Ярлык: {}", lnk_gone="✓ Ярлыки убраны", auto_on="✓ Автозапуск включён",
         auto_off="✓ Автозапуск выключен", restart="↻ Перезапускаю сервер TwoKey, чтобы применить новую версию…",
         other="⚠ На порту работает другая копия TwoKey ({}) — закройте её",
         old="⚠ Работает старая версия сервера TwoKey — закройте её окно (Ctrl+C) и откройте TwoKey ярлыком",
         done="Готово! TwoKey установлен.",
         done_rm="Готово. Хук и ярлыки убраны, папка {} осталась — её можно удалить вручную.", err="✗ Ошибка: {}",
-        py_old="Нужен Python 3.10 или новее", confirm_rm="Отключить TwoKey от Claude Code и убрать ярлыки?",
+        py_old="Нужен Python 3.10 или новее", confirm_rm="Отключить защиту TwoKey и убрать ярлыки?",
         stopping="↻ Останавливаю сервер TwoKey…", old_rm="⚠ Работает старая версия сервера TwoKey — закройте её окно (Ctrl+C)",
         hook_none="• Хука TwoKey в {} не нашлось — отключать нечего",
         no_tk="Нет модуля tkinter. Запустите в консоли: python install.py --yes",
-        hooks_off="⚠ В настройках Claude Code выключены все хуки — TwoKey не сработает. Включите хуки (/hooks) и запустите установку снова",
+        hooks_off="⚠ В настройках агента выключены все хуки — TwoKey не сработает. Включите хуки (/hooks) и запустите установку снова",
         store="⚠ Установка идёт на Python из Microsoft Store: ярлык в «Пуске» и автозапуск могут не появиться. Надёжнее — Python с python.org"),
     "en": dict(
         title="TwoKey setup", sub="The second key for AI agents", lang="Language",
@@ -43,19 +43,19 @@ T = {
         auto="Start with Windows", open="Open TwoKey when done", folder="Folder: {}",
         install="Install", update="Update", remove="Uninstall", close="Close",
         copy="✓ Program copied to {}", env_new="✓ Settings file .env created", env_keep="✓ Settings kept (.env untouched)",
-        hook_ok="✓ Protection connected to Claude Code ({})", hook_gone="✓ Protection disconnected from Claude Code",
-        cc_old="⚠ Claude Code CLI {} does not know onFailure — a crashed hook lets the action through. Update: claude update",
-        cc_ok="✓ Claude Code: {}", lnk="✓ Shortcut: {}", lnk_gone="✓ Shortcuts removed", auto_on="✓ Autostart on",
+        hook_ok="✓ Protection connected ({})", hook_gone="✓ Protection disconnected",
+        cc_old="⚠ Agent version {} does not know onFailure — a crashed hook lets the action through. Update: claude update",
+        cc_ok="✓ Agent version: {}", lnk="✓ Shortcut: {}", lnk_gone="✓ Shortcuts removed", auto_on="✓ Autostart on",
         auto_off="✓ Autostart off", restart="↻ Restarting the TwoKey server to apply the new version…",
         other="⚠ Another TwoKey copy is running on the port ({}) — close it",
         old="⚠ An old TwoKey server version is running — close its window (Ctrl+C) and open TwoKey from the shortcut",
         done="Done! TwoKey is installed.",
         done_rm="Done. Hook and shortcuts removed; folder {} is kept — delete it by hand if you like.", err="✗ Error: {}",
-        py_old="Python 3.10 or newer is required", confirm_rm="Disconnect TwoKey from Claude Code and remove shortcuts?",
+        py_old="Python 3.10 or newer is required", confirm_rm="Turn off TwoKey protection and remove shortcuts?",
         stopping="↻ Stopping the TwoKey server…", old_rm="⚠ An old TwoKey server version is running — close its window (Ctrl+C)",
         hook_none="• No TwoKey hook found in {} — nothing to disconnect",
         no_tk="tkinter is missing. Run in a console: python install.py --yes",
-        hooks_off="⚠ All hooks are turned off in the Claude Code settings — TwoKey will not run. Turn hooks on (/hooks) and run setup again",
+        hooks_off="⚠ All hooks are turned off in the agent settings — TwoKey will not run. Turn hooks on (/hooks) and run setup again",
         store="⚠ Setup runs on Python from the Microsoft Store: the Start menu shortcut and autostart may not appear. Python from python.org is more reliable"),
     "kk": dict(
         title="TwoKey орнату", sub="ЖИ-агенттерге арналған екінші кілт", lang="Тіл",
@@ -63,19 +63,19 @@ T = {
         auto="Windows-пен бірге іске қосу", open="Орнатқан соң TwoKey-ді ашу", folder="Қалта: {}",
         install="Орнату", update="Жаңарту", remove="Жою", close="Жабу",
         copy="✓ Бағдарлама {} қалтасына көшірілді", env_new="✓ .env баптау файлы жасалды", env_keep="✓ Баптаулар сақталды (.env өзгермеді)",
-        hook_ok="✓ Қорғаныс Claude Code-қа қосылды ({})", hook_gone="✓ Қорғаныс Claude Code-тан ажыратылды",
-        cc_old="⚠ Claude Code CLI {} onFailure-ды білмейді — хук құласа, әрекет өтіп кетеді. Жаңартыңыз: claude update",
-        cc_ok="✓ Claude Code: {}", lnk="✓ Белгіше: {}", lnk_gone="✓ Белгішелер жойылды", auto_on="✓ Автоіске қосу қосулы",
+        hook_ok="✓ Қорғаныс қосылды ({})", hook_gone="✓ Қорғаныс ажыратылды",
+        cc_old="⚠ Агенттің {} нұсқасы onFailure-ды білмейді — хук құласа, әрекет өтіп кетеді. Жаңартыңыз: claude update",
+        cc_ok="✓ Агент нұсқасы: {}", lnk="✓ Белгіше: {}", lnk_gone="✓ Белгішелер жойылды", auto_on="✓ Автоіске қосу қосулы",
         auto_off="✓ Автоіске қосу өшірулі", restart="↻ Жаңа нұсқа іске қосылуы үшін TwoKey серверін қайта қосамын…",
         other="⚠ Портта TwoKey-дің басқа көшірмесі жұмыс істеп тұр ({}) — оны жабыңыз",
         old="⚠ TwoKey серверінің ескі нұсқасы жұмыс істеп тұр — оның терезесін жабыңыз (Ctrl+C), содан кейін TwoKey-ді белгішеден ашыңыз",
         done="Дайын! TwoKey орнатылды.",
         done_rm="Дайын. Хук пен белгішелер жойылды, {} қалтасы қалды — оны қолмен жоюға болады.", err="✗ Қате: {}",
-        py_old="Python 3.10 немесе жаңарақ нұсқасы керек", confirm_rm="TwoKey-ді Claude Code-тан ажыратып, белгішелерді жою керек пе?",
+        py_old="Python 3.10 немесе жаңарақ нұсқасы керек", confirm_rm="TwoKey қорғанысын өшіріп, белгішелерді жою керек пе?",
         stopping="↻ TwoKey серверін тоқтатамын…", old_rm="⚠ TwoKey серверінің ескі нұсқасы жұмыс істеп тұр — оның терезесін жабыңыз (Ctrl+C)",
         hook_none="• {} ішінде TwoKey хугы табылмады — ажырататын ештеңе жоқ",
         no_tk="tkinter модулі жоқ. Консольде іске қосыңыз: python install.py --yes",
-        hooks_off="⚠ Claude Code баптауларында барлық хуктар өшірулі — TwoKey іске қосылмайды. Хуктарды қосып (/hooks), орнатуды қайта іске қосыңыз",
+        hooks_off="⚠ Агент баптауларында барлық хуктар өшірулі — TwoKey іске қосылмайды. Хуктарды қосып (/hooks), орнатуды қайта іске қосыңыз",
         store="⚠ Орнату Microsoft Store-дағы Python-да жүріп жатыр: «Бастау» мәзіріндегі белгіше мен автоіске қосу шықпауы мүмкін. python.org сайтындағы Python сенімдірек"),
 }
 
@@ -203,7 +203,7 @@ def edit_hooks(settings_path, home, add=True):
 
 
 def hooks_disabled(settings_path):
-    """В настройках Claude Code выключены все хуки (disableAllHooks) — TwoKey подключён, но не сработает."""
+    """В настройках агента выключены все хуки (disableAllHooks) — TwoKey подключён, но не сработает."""
     try:
         with open(settings_path, encoding="utf-8-sig") as f:
             return bool(json.load(f).get("disableAllHooks"))
@@ -221,7 +221,7 @@ def copy_program(home, lang, say, t):
             shutil.copyfile(src, os.path.join(home, name + ".new"))
             os.replace(os.path.join(home, name + ".new"), os.path.join(home, name))
     with open(os.path.join(home, ".ignore"), "w", encoding="utf-8") as f:
-        f.write("*\n")  # поиск Claude Code (ripgrep) не заглядывает в папку: там токен бота
+        f.write("*\n")  # поиск агента (ripgrep) не заглядывает в папку: там токен бота
     say(t["copy"].format(home))
     env = os.path.join(home, ".env")
     if os.path.exists(env):
@@ -406,7 +406,14 @@ BG, SURFACE, FG, MUTED, ACCENT, LOGBG = "#0E151D", "#16202B", "#E9EEF3", "#9AA7B
 def gui(opts):
     import tkinter as tk
     from tkinter import messagebox, ttk
+    if os.name == "nt":  # своя кнопка на панели задач, а не значок Python
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TwoKey.Setup")
     root = tk.Tk()
+    try:
+        root.iconbitmap(default=os.path.join(SRC, "icon.ico"))
+    except tk.TclError:
+        pass  # не Windows или файла нет: останется значок по умолчанию
     root.configure(bg=BG)
     style = ttk.Style(root)
     style.theme_use("clam")

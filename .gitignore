@@ -8,5 +8,6 @@ rules.json
 # служебные файлы запущенной программы
 panel.ticket
 server.log
+backups/
 .window/
 .ignore

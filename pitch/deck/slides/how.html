@@ -1,26 +1,20 @@
 <section id="how">
 <p class="eyebrow">КАК РАБОТАЕТ</p>
-<h2>Путь одного действия</h2>
+<h2>Проверяем действие, а не промпт</h2>
 <div class="row" style="gap:16px; align-items:stretch">
-<div class="card grow rise" style="--i:0"><h3>ИИ-агент</h3><p class="txt">Claude Code, Cursor, любой MCP</p></div>
-<x-shape kind="arrow-right" class="rise" style="--i:1; width:48px; height:24px; background:#A7B3BF; align-self:center"></x-shape>
-<div class="card grow rise" style="--i:1"><h3>Перехват</h3><p class="txt">хук или HTTP API, до запуска</p></div>
-<x-shape kind="arrow-right" class="rise" style="--i:2; width:48px; height:24px; background:#A7B3BF; align-self:center"></x-shape>
-<div class="card grow rise" style="--i:2"><h3>Правила</h3><p class="txt">за мс, не обмануть</p></div>
-<x-shape kind="arrow-right" class="rise" style="--i:3; width:48px; height:24px; background:#A7B3BF; align-self:center"></x-shape>
-<div class="card grow rise" style="--i:3"><h3>AI-судья</h3><p class="txt">только повышает риск</p></div>
-<x-shape kind="arrow-right" class="rise" style="--i:4; width:48px; height:24px; background:#A7B3BF; align-self:center"></x-shape>
-<div class="card hot grow rise" style="--i:4"><h3>Telegram</h3><p class="txt">второй ключ у человека</p></div>
+<div class="card grow rise" style="--i:0; flex-basis:0"><h3>ИИ-агент</h3><p class="txt">подключается хуком или через HTTP API</p></div>
+<x-shape kind="arrow-right" class="rise" style="--i:1; width:48px; height:24px; background:#A7B3BF; align-self:center; flex:none"></x-shape>
+<div class="card grow rise" style="--i:1; flex-basis:0"><h3>Правила</h3><p class="txt">доли миллисекунды, их нельзя уговорить</p></div>
+<x-shape kind="arrow-right" class="rise" style="--i:2; width:48px; height:24px; background:#A7B3BF; align-self:center; flex:none"></x-shape>
+<div class="card grow rise" style="--i:2; flex-basis:0"><h3>AI-судья</h3><p class="txt">по желанию: облако или своя модель; только повышает риск</p></div>
+<x-shape kind="arrow-right" class="rise" style="--i:3; width:48px; height:24px; background:#A7B3BF; align-self:center; flex:none"></x-shape>
+<div class="card hot grow rise" style="--i:3; flex-basis:0"><h3>Человек</h3><p class="txt">решает в Telegram или в окне TwoKey</p></div>
 </div>
-<div class="row rise" style="--i:5; margin-top:48px; align-items:center">
-<p class="pill safe">риск ниже HIGH</p>
-<p class="body">пропуск без задержки, MEDIUM пишется в журнал</p>
+<div class="grow"></div>
+<div class="cards c3 rise" style="--i:4">
+<div class="card"><p class="tag">Безопасное</p><p class="txt">проходит без задержки</p></div>
+<div class="card"><p class="tag">Опасное</p><p class="txt">ждёт вашего решения</p></div>
+<div class="card"><p class="tag">Нет ответа или сбой</p><p class="txt">действие не выполняется</p></div>
 </div>
-<div class="cards c4 rise" style="--i:6; margin-top:48px">
-<div class="card"><p class="tag">Пропустить</p><p class="txt">действие выполняется</p></div>
-<div class="card"><p class="tag">Отклонить</p><p class="txt">запрет, без обходных путей</p></div>
-<div class="card"><p class="tag">Своё решение</p><p class="txt">ваш текст — инструкция агенту</p></div>
-<div class="card"><p class="tag">Вручную</p><p class="txt">агент остановлен</p></div>
-</div>
-<aside>Вот путь одного действия. Агент решил выполнить команду. Хук перехватывает её до запуска и отправляет в TwoKey. Правила сразу отсекают очевидное: безопасное проходит без задержки, средний риск пишется в журнал. Если риск высокий или критический, подключается AI-судья — он объясняет простыми словами, что случится, и предлагает альтернативу. И сообщение уходит в Telegram. У человека четыре варианта: пропустить, отклонить, написать своё решение — тогда агент получит его как инструкцию — или остановить агента и разобраться вручную. Если никто не ответил за пять минут, упал сервер или Telegram — действие блокируется. Мы всегда ошибаемся в сторону безопасности.</aside>
+<aside>TwoKey встаёт между агентом и миром и проверяет само действие, а не промпт. Сначала правила — за доли миллисекунды, их нельзя уговорить. Затем, по желанию, AI-судья — облачный или своя модель без интернета. Опасное действие ждёт человека — в Telegram и в окне TwoKey. Нет ответа — отказ.</aside>
 </section>

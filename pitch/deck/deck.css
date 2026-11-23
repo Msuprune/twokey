@@ -45,6 +45,8 @@ section.light .card .txt { color: var(--slate); }
 .card.hot { background: var(--ember); color: var(--ink); }
 .card.hot .txt { color: var(--ink); }
 .card.hot .tag { color: var(--ink); }
+section.light .card.hot { background: var(--ember); }
+section.light .card.hot .txt { color: var(--ink); }
 
 .num { font-size: 120px; font-weight: 700; line-height: 1; letter-spacing: -2px; color: var(--ember); margin: 0; }
 .num-label { font-size: 32px; line-height: 1.3; color: var(--fog); margin: 0; }

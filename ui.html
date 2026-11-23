@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TwoKey — панель</title>
+<link rel="icon" type="image/png" href="/icon.png">
 <style nonce="{{NONCE}}">
 :root {
   color-scheme: dark;
@@ -31,6 +32,7 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .top { border-bottom: 1px solid var(--line); background: var(--surface); }
 .top .wrap { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding-block: 14px; }
 .brand { display: flex; align-items: baseline; gap: 10px; }
+.brand img { align-self: center; border-radius: 7px; }
 .brand h1 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
 .brand h1 span { color: var(--accent); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -165,7 +167,7 @@ legend { font-weight: 600; padding: 0 6px; }
 <div id="app">
 <header class="top">
   <div class="wrap">
-    <div class="brand"><h1>Two<span>Key</span></h1><span class="muted small">второй ключ для ИИ-агентов</span></div>
+    <div class="brand"><img src="/icon.png" alt="" width="30" height="30"><h1>Two<span>Key</span></h1><span class="muted small">второй ключ для ИИ-агентов</span></div>
     <div class="chips">
       <span class="chip" id="chip-conn">подключаемся…</span>
       <span class="chip" id="chip-tg">Telegram</span>
@@ -305,9 +307,19 @@ legend { font-weight: 600; padding: 0 6px; }
 
         <h3>Решения</h3>
         <label class="field"><span>Сколько ждать ответа человека: <output id="timeout-out"></output></span>
-          <input type="range" name="GUARDIAN_TIMEOUT" min="60" max="900" step="30">
-          <span class="muted small">Нет ответа за это время — действие блокируется.</span>
+          <input type="range" name="GUARDIAN_TIMEOUT" min="30" max="930" step="30">
+          <span class="muted small" id="timeout-hint"></span>
+          <span class="result bad" id="timeout-warn" hidden></span>
         </label>
+
+        <h3>Бэкап файлов</h3>
+        <fieldset>
+          <legend>Когда агент хочет изменить или удалить файлы и TwoKey спрашивает вас</legend>
+          <label class="check"><input type="radio" name="GUARDIAN_BACKUP" value="auto"><span>Сразу делать копию затронутых файлов <span class="muted small">(рекомендуется)</span></span></label>
+          <label class="check"><input type="radio" name="GUARDIAN_BACKUP" value="ask"><span>По кнопке «Сделать бэкап» в карточке</span></label>
+          <label class="check"><input type="radio" name="GUARDIAN_BACKUP" value="off"><span>Не делать</span></label>
+        </fieldset>
+        <p class="muted small">Копии лежат в папке TwoKey (backups): агент не может их ни прочитать, ни удалить. Хранятся последние 50 копий, всего не больше 2 ГБ; список — команда /backups в боте.</p>
 
         <h3>AI-судья</h3>
         <fieldset>
@@ -376,9 +388,10 @@ function translateDom(root) {
 }
 const LEVEL_RU ={ SAFE: 'безопасно', LOW: 'низкий', MEDIUM: 'средний', HIGH: 'высокий', CRITICAL: 'критический' };
 const CAT_RU = { db: 'Базы данных', fs: 'Файлы и диски', git: 'Git', leak: 'Утечка секретов', key: 'Секреты в коде',
-  public: 'Публичный доступ', deploy: 'Деплой', infra: 'Инфраструктура', exec: 'Чужой код', tool: 'MCP-инструменты', self: 'Самозащита' };
-const DECISION_RU = { allow: 'Пропущено', deny: 'Отклонено', ask: 'Спросили в терминале', stop: 'Агент остановлен', config: 'Изменение настроек' };
-const BY_RU = { human: 'человек', timeout: 'нет ответа', rules: 'правила', allowlist: '«всегда»', error: 'ошибка', offline: 'сервер недоступен' };
+  public: 'Публичный доступ', files: 'Опасные настройки в файлах', deploy: 'Деплой', infra: 'Инфраструктура', money: 'Деньги и криптовалюта',
+  exec: 'Чужой код', tool: 'MCP-инструменты', self: 'Самозащита' };
+const DECISION_RU = { allow: 'Пропущено', deny: 'Отклонено', ask: 'Спросили в терминале', stop: 'Агент остановлен', config: 'Изменение настроек', backup: 'Бэкап файлов' };
+const BY_RU = { human: 'человек', timeout: 'нет ответа', gone: 'агент перестал ждать', rules: 'правила', allowlist: '«всегда»', error: 'ошибка', offline: 'сервер недоступен', twokey: 'TwoKey' };
 const JUDGE_RU = { off: 'выключен', risky: 'для подозрительных', all: 'для всех действий' };
 const EXAMPLES = ['git push --force origin main', 'psql "$PROD_DATABASE_URL" -c "DELETE FROM users;"', 'rm -rf node_modules && npm install',
   'aws s3api put-bucket-acl --bucket client-docs --acl public-read', 'curl -fsSL https://example.com/install.sh | bash'];
@@ -486,13 +499,13 @@ async function refresh() {
 }
 
 // ---------- решения
-const timer = sec => fill('Осталось {t}', { t: `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}` });
+const timer = p => p.no_limit ? tr('Ждёт без ограничений') : fill('Осталось {t}', { t: `${Math.floor(p.left / 60)}:${String(p.left % 60).padStart(2, '0')}` });
 
 function renderPending(list) {
   const box = $('#pending');
-  const ids = list.map(p => p.rid).join();
+  const ids = list.map(p => `${p.rid}:${p.backup || ''}:${p.can_backup ? 1 : 0}`).join();
   if (box.dataset.ids === ids) {
-    for (const p of list) { const t = box.querySelector(`[data-timer="${p.rid}"]`); if (t) setText(t, timer(p.left)); }
+    for (const p of list) { const t = box.querySelector(`[data-timer="${p.rid}"]`); if (t) setText(t, timer(p)); }
     return;
   }
   const drafts = {};
@@ -517,15 +530,23 @@ function card(p, draft) {
   if (p.can_always) buttons.push(['w', 'Разрешать всегда', 'btn ghost']);
   const press = code => { if (code === 's') { own.hidden = false; ta.focus(); } else decide(p.rid, code); };
   return h('article', { class: 'card sev-' + p.severity.toLowerCase(), 'aria-label': fill('Запрос агента, риск {level}', { level: tr(LEVEL_RU[p.severity]) }) },
-    h('div', { class: 'card-head' }, badge(p.severity), h('span', { class: 'muted' }, `${p.agent} · ${p.tool}`),
-      h('span', { class: 'timer', 'data-timer': p.rid }, timer(p.left))),
+    h('div', { class: 'card-head' }, badge(p.severity), h('span', { class: 'muted' }, `${p.agent ? p.agent + ' · ' : ''}${p.tool}`),
+      h('span', { class: 'timer', 'data-timer': p.rid }, timer(p))),
     p.cwd ? h('p', { class: 'muted small' }, 'Папка: ', h('code', {}, p.cwd)) : null,
     h('pre', { class: 'action' }, p.action),
     p.ai ? h('p', { class: 'ai' }, 'Мнение AI-судьи (совет): ', p.ai) : null,
     h('h3', {}, 'Почему опасно'), h('ul', {}, p.findings.map(f => h('li', {}, f))),
     p.fixes.length ? [h('h3', {}, 'Как безопаснее'), h('ul', {}, p.fixes.map(f => h('li', {}, f)))] : null,
-    h('div', { class: 'actions' }, buttons.map(([code, label, cls]) => h('button', { type: 'button', class: cls, onclick: () => press(code) }, label))),
+    p.backup ? h('p', { class: 'muted small' }, p.backup) : null,
+    h('div', { class: 'actions' }, buttons.map(([code, label, cls]) => h('button', { type: 'button', class: cls, onclick: () => press(code) }, label)),
+      p.can_backup ? h('button', { type: 'button', class: 'btn ghost', onclick: () => backup(p.rid) }, '💾 Сделать бэкап') : null),
     own);
+}
+
+async function backup(rid) {
+  try { await api('/api/decide', { rid, choice: 'b' }); toast('Делаю бэкап…'); }
+  catch (e) { if (e.message !== 'token') toast(e.message, true); }
+  refresh();
 }
 
 async function decide(rid, choice, text = '') {
@@ -574,7 +595,7 @@ async function forget(id) {
 }
 
 // ---------- правила
-const CAT_ORDER = ['db', 'fs', 'git', 'leak', 'key', 'public', 'deploy', 'infra', 'exec', 'tool', 'self'];
+const CAT_ORDER = ['db', 'fs', 'git', 'leak', 'key', 'public', 'files', 'deploy', 'infra', 'money', 'exec', 'tool', 'self'];
 
 function renderRules(rules, disabled) {
   const box = $('#rules');
@@ -700,6 +721,7 @@ cmd.addEventListener('input', check);
 // ---------- настройки
 const sform = $('#settings-form');
 let settings = null;
+const NO_LIMIT = 930;  // крайняя правая точка ползунка; на сервер уходит 0
 const fmtTime = sec => sec >= 60 ? `${Math.floor(sec / 60)} ${tr('мин')}${sec % 60 ? ` ${sec % 60} ${tr('с')}` : ''}` : `${sec} ${tr('с')}`;
 const verLess = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i]; return false; };
 
@@ -712,13 +734,25 @@ async function loadSettings() {
     else if (el.type === 'password') {
       el.value = '';
       el.placeholder = settings.secret_set[el.name] ? fill('задан ({v}) — оставьте пустым, чтобы не менять', { v: v[el.name] }) : tr('не задан');
-    } else el.value = v[el.name];
+    } else el.value = el.name === 'GUARDIAN_TIMEOUT' && v[el.name] === '0' ? NO_LIMIT : v[el.name];
   }
+  sform.GUARDIAN_TIMEOUT.dataset.loaded = sform.GUARDIAN_TIMEOUT.value;
   $('#autostart').checked = settings.autostart; $('#autostart').disabled = !settings.autostart_supported;
   updateTimeout(); updateProvider(); renderSystem(); chatHint();
 }
 
-function updateTimeout() { $('#timeout-out').textContent = fmtTime(Number(sform.GUARDIAN_TIMEOUT.value)); }
+function updateTimeout() {
+  const el = sform.GUARDIAN_TIMEOUT, forever = Number(el.value) >= NO_LIMIT, hk = settings?.hook;
+  const text = forever ? tr('без ограничений') : fmtTime(Number(el.value));
+  $('#timeout-out').textContent = text;
+  el.setAttribute('aria-valuetext', text);
+  $('#timeout-hint').textContent = tr(forever
+    ? 'TwoKey ждёт, пока вы не ответите: до этого действие не выполнится, а агент стоит. Прервёте агента — карточка закроется сама.'
+    : 'Нет ответа за это время — действие блокируется.');
+  const warn = $('#timeout-warn');
+  warn.hidden = !(forever && hk?.installed && !hk.long_wait);
+  if (!warn.hidden) warn.textContent = fill('Подключение агента пока ждёт не дольше {m} мин. Запустите install.bat → «Обновить» и перезапустите агента.', { m: Math.round((hk.timeout || 600) / 60) });
+}
 sform.GUARDIAN_TIMEOUT.addEventListener('input', updateTimeout);
 
 const PROVIDER_HINT = {
@@ -745,10 +779,10 @@ function chatHint() {
 function renderSystem() {
   const hk = settings.hook, cv = settings.claude, rows = [];
   const add = (k, v, cls) => rows.push(h('div', {}, h('dt', {}, k), h('dd', { class: cls || '' }, v)));
-  add('Хук Claude Code', hk.installed ? tr(hk.ours ? 'подключён к этой копии TwoKey' : 'подключён к другой копии TwoKey') + ' · ' +
+  add('Подключение агента', hk.installed ? tr(hk.ours ? 'подключён к этой копии TwoKey' : 'подключён к другой копии TwoKey') + ' · ' +
     tr(hk.on_failure === 'block' ? 'при сбое блокирует' : 'без onFailure — при сбое пропустит') : tr('не подключён — запустите установщик'), hk.installed && hk.ours ? 'result good' : 'result bad');
   const old = cv.cli && verLess(cv.cli, '2.1.295');
-  add('Claude Code', [cv.desktop ? fill('приложение {v}', { v: cv.desktop }) : '', cv.cli ? `CLI ${cv.cli}` + (old ? ' — ' + tr('устарел, обновите: claude update') : '') : ''].filter(Boolean).join(' · ') || tr('не найден'), old ? 'result bad' : '');
+  add('Версия агента', [cv.desktop ? fill('приложение {v}', { v: cv.desktop }) : '', cv.cli ? `CLI ${cv.cli}` + (old ? ' — ' + tr('устарел, обновите: claude update') : '') : ''].filter(Boolean).join(' · ') || tr('не найден'), old ? 'result bad' : '');
   add('Python', settings.python);
   add('Папка TwoKey', settings.home);
   $('#sysinfo').replaceChildren(...rows);
@@ -761,7 +795,9 @@ sform.addEventListener('submit', async e => {
     if (!el.name || !(el.name in settings.values)) continue;
     if (el.type === 'radio') { if (el.checked && el.value !== settings.values[el.name]) out[el.name] = el.value; continue; }
     if (el.type === 'password') { if (el.value) out[el.name] = el.value; continue; }  // пусто — секрет не меняем
-    if (el.value !== settings.values[el.name]) out[el.name] = el.value;
+    if (el.name === 'GUARDIAN_TIMEOUT' && el.value === el.dataset.loaded) continue;  // ползунок не трогали: 45 с из .env не округлятся до шага
+    const value = el.name === 'GUARDIAN_TIMEOUT' && Number(el.value) >= NO_LIMIT ? '0' : el.value;
+    if (value !== settings.values[el.name]) out[el.name] = value;
   }
   if (!Object.keys(out).length) { toast('Изменений нет'); return; }
   try {

@@ -7,7 +7,7 @@
 с кнопками «Пропустить / Отклонить / Своё решение / Разберусь вручную».
 
   python guardian.py serve          сервер + Telegram-бот (держать запущенным)
-  python guardian.py hook           PreToolUse-хук Claude Code (JSON из stdin)
+  python guardian.py hook           PreToolUse-хук агента (JSON из stdin)
   python guardian.py check "CMD"    проверить команду и показать вердикт
   python guardian.py demo           сценарий для питча (нужен запущенный serve)
   python guardian.py bench FILE     точность на наборе JSONL {tool,input,expect}
@@ -15,7 +15,7 @@
 
 Только стандартная библиотека. Для AI-судьи: pip install anthropic.
 """
-import hashlib, hmac, html, json, os, re, secrets, socket, sys, threading, time, urllib.error, urllib.request
+import hashlib, hmac, html, json, os, re, secrets, select, socket, stat, sys, threading, time, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,20 +39,24 @@ ENV_PATH = os.path.join(HERE, ".env")
 HOST = os.environ.get("GUARDIAN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("GUARDIAN_PORT", "8765"))
 URL = f"http://127.0.0.1:{PORT}/check"  # только localhost: адрес нельзя подменить конфигом
+# GUARDIAN_TIMEOUT=0 — ждать без ограничений. ponytail: это 3 недели: агент считает таймаут хука в мс, таймер живёт до 24,8 дня
+NO_LIMIT = 21 * 86400
 
 
 def apply_settings():
     """Настройки из окружения (.env уже прочитан) → глобальные значения. Зовём при старте и после сохранения в окне."""
-    global TG_TOKEN, TG_CHAT_ID, TG_ADMINS, TIMEOUT, JUDGE, MODEL, LANG, PROVIDER, JUDGE_URL, JUDGE_KEY, JUDGE_CMD, _client
+    global TG_TOKEN, TG_CHAT_ID, TG_ADMINS, TIMEOUT, JUDGE, MODEL, LANG, PROVIDER, JUDGE_URL, JUDGE_KEY, JUDGE_CMD, BACKUP, _client
     e = os.environ.get
     TG_TOKEN, TG_CHAT_ID = e("TG_TOKEN", ""), e("TG_CHAT_ID", "")
     TG_ADMINS = {a.strip() for a in e("TG_ADMINS", "").split(",") if a.strip()}
-    TIMEOUT = min(max(int(e("GUARDIAN_TIMEOUT", "300") or 300), 30), 900)  # хук ждёт до 960 с — запас 60 с
+    wait = int(e("GUARDIAN_TIMEOUT", "300") or 300)
+    TIMEOUT = NO_LIMIT if wait == 0 else min(max(wait, 30), 900)
     JUDGE = e("GUARDIAN_JUDGE", "risky")  # off | risky | all
     PROVIDER = e("GUARDIAN_JUDGE_PROVIDER", "claude")  # claude | openai | command
     MODEL = e("GUARDIAN_MODEL", "") or ("claude-opus-5-5" if PROVIDER == "claude" else "")
     JUDGE_URL, JUDGE_KEY, JUDGE_CMD = e("GUARDIAN_JUDGE_URL", ""), e("GUARDIAN_JUDGE_KEY", ""), e("GUARDIAN_JUDGE_CMD", "")
     LANG = e("GUARDIAN_LANG", "ru") if e("GUARDIAN_LANG", "ru") in ("ru", "en", "kk") else "ru"
+    BACKUP = e("GUARDIAN_BACKUP", "auto") if e("GUARDIAN_BACKUP", "auto") in ("auto", "ask", "off") else "auto"
     _client = None  # ключ или провайдер могли смениться
 
 
@@ -289,6 +293,223 @@ RULES = [
     ("mcp-external", HIGH, "tool",
      r"(?:^|_|-)(send|publish|post|tweet|email|transfer|pay|payment|payout|charge|refund|deploy|merge|invite|share)(?:_|-|$)",
      "Действие с внешним эффектом (отправка, платёж, публикация)", "Проверьте получателя и содержимое"),
+    # --- утечки, публикация и обход защиты: громкие случаи с ИИ-агентами 2023–2026 (источники — docs/INCIDENTS.md)
+    ("ai-cli-bypass", CRITICAL, "exec",
+     r"(?:(?<![\w.-])(?:gemini|qwen)(?:\.cmd|\.exe)?|@google/gemini-cli\S*)\s(?:[^;\n|&]*\s)?(?:-y\b|--yolo\b|-"
+     r"""-approval-mode[=\s]+['"]?yolo\b)|\b(?:q|kiro-cli)\s+chat\b[^;\n|&]*\s--trust-all-tools\b|\bcodex\b[^;\n|"""
+     r"&]*\s--(?:dangerously-bypass-approvals-and-sandbox|yolo)\b|\bcopilot\b[^;\n|&]*\s--(?:allow-all-tools|al"
+     r"low-all|yolo)\b|\bcursor-agent\b[^;\n|&]*\s(?:--force|-f)\b|\bamp\b[^;\n|&]*\s--dangerously-allow-all\b|"
+     r"""\bclaude\b[^;\n|&]*\s(?:--allow-dangerously-skip-permissions\b|--permission-mode[=\s]+['"]?bypassPermiss"""
+     r"ions\b)",
+     "Запуск другого ИИ-агента без подтверждений: его действия TwoKey не видит", "Запускайте агента в обычном режиме с подтверждениями"),
+    ("secret-hunt", HIGH, "leak",
+     r"\b(?:find|fd|Get-ChildItem|gci|dir)\s(?=[^;\n|]*(?:id_rsa|id_ed25519|\.pem\b|\.key\b|wallet|keystore|\.e"
+     r"""nv\b|credentials|\.npmrc|mnemonic|\.kdbx))[^;\n|]*?(?<=\s)['"]?(?:~|\$HOME|\$\{HOME\}|\$env:USERPROFILE|"""
+     r"""%USERPROFILE%|/|/root|/home(?:/[^/\s'"]+)?|(?:/[a-z])?/Users(?:/[^/\s'"]+)?|[a-z]:(?:[\\/]Users(?:[\\/]["""
+     r"""^\\/\s'"]+)?)?)[\\/]?(?:\*[\w.*]*)?['"]?(?=\s|$)""",
+     "Поиск ключей, кошельков и .env по всей домашней папке — разведка перед кражей", "Ищите только внутри проекта и по конкретному имени"),
+    ("cred-dump", HIGH, "leak",
+     r"\bgh\s+auth\s+token\b|\bgh\s+auth\s+status\b[^;\n|&]*\s--show-token\b|\bgit\s+credential(?:-\w+)?\s+(?:f"
+     r"ill|get)\b|\baws\s+configure\s+(?:get\s+\S*secret|export-credentials)|(?<![\w.-])op\s+(?:read|item\s+(?:"
+     r"get|list|ls)|vault\s+(?:list|ls)|document\s+get)\b|(?<![\w.-])bw\s+(?:get|list|export)\b|\blpass\s+(?:sh"
+     r"ow|ls|export)\b|\bsecurity\s+(?:dump-keychain\b|find-(?:generic|internet)-password\b[^;\n|&]*\s-[a-z]*[w"
+     r"g]\b)",
+     "Агент достаёт токены и пароли из менеджера паролей, связки ключей или gh", "Передавайте агенту только нужные переменные окружения (op run, env)"),
+    ("imds-creds", HIGH, "leak",
+     r"""(?:169\.254\.169\.254|\[?fd00:ec2::254\]?)[^\s'"]*/latest/meta-data/iam/security-credentials|169\.254\.1"""
+     r"""69\.254[^\s'"]*/metadata/identity/oauth2/token|/computeMetadata/v1/instance/service-accounts\b|\b169\.25"""
+     r"4\.170\.2\b|\b(?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^;\n]*AWS_CONTAINER_CREDENTIAL"
+     r"S_(?:RELATIVE|FULL)_URI",
+     "Запрос облачных учётных данных из метаданных инстанса или контейнера", "Агенту не нужны ключи роли — используйте выделенный минимальный профиль"),
+    ("dns-exfil", HIGH, "leak",
+     r"(?:(?<![\w.$-])(?:nslookup|dig|ping6?|drill|Resolve-DnsName)|(?:^|[;&|(`]\s*|\b(?:sudo|do|then)\s+)host)"
+     r"\s[^;\n|&]*?(?:\$\((?!\s*hostname\b)[^)\n]{1,200}\)|`(?!\s*hostname\b)[^`\n]{1,200}`|\$(?:env:)?\{?\w*(?"
+     r":KEY|TOKEN|SECRET|PASS(?:WORD|WD)?|CRED)\w*\}?|(?<![\w-])(?:sk-|AKIA|ASIA|ghp_|gho_|github_pat_|xox[abpr"
+     r"]-)[\w-]{8,})\.[\w-]+\.[a-z]{2,}",
+     "Данные или ключ подставлены в имя хоста — утечка через DNS-запрос", "Не выполнять; проверяйте сеть на фиксированных именах хостов"),
+    ("env-exfil", CRITICAL, "leak",
+     r"\b(?:env|printenv|set|export\s+-p)\s*\|(?:[^;\n]*\|)?\s*(?:curl|wget|nc|ncat|netcat|socat)\b|(?:\b(?:Get"
+     r"-ChildItem|gci|dir|ls)\s+env:|\[(?:System\.)?Environment\]::GetEnvironmentVariables)[^;\n]*\b(?:Invoke-W"
+     r"ebRequest|iwr|Invoke-RestMethod|irm|curl)\b|\b(?:curl|wget)\b[^;\n]*(?:\$\(|`)\s*(?:env|printenv)\s*[|)`"
+     r"]|/proc/(?:self|\d+)/environ[^;\n]*\b(?:curl|wget|nc)\b|\b(?:curl|wget)\b[^;\n]*@/proc/(?:self|\d+)/envi"
+     r"ron",
+     "Все переменные окружения (с ключами) уходят во внешний сервис", "Не выполнять; передавайте только нужные несекретные значения"),
+    ("exfil-host", HIGH, "leak",
+     r"\b(?:webhook\.site|requestbin\.(?:com|net)|pipedream\.net|beeceptor\.com|requestcatcher\.com|hookbin\.co"
+     r"m|interactsh\.com|oast\.(?:pro|live|site|online|fun|me)|oastify\.com|burpcollaborator\.net|dnslog\.cn|ce"
+     r"ye\.io|requestinspector\.com|webhook\.cool|postb\.in)\b|(?:(?<=//)|(?<=[\w-]\.))interact\.sh\b|\b(?:curl"
+     r"""|wget|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b(?=[^;\n]*(?:\s(?-i:-[FT])(?:\s|['"]?[\w.-]*=)|\s--("""
+     r"?:upload-file|post-file|body-file|form(?!-string))\b|\s(?:(?-i:-d)\s*|--data(?:-binary|-urlencode)?[=\s]"
+     r"""+)['"]?(?:\w+=)?@|\s-(?:InFile|Form|Body)\b))(?=[^;\n]*(?:(?<![\w-])(?:file\.io|0x0\.st|bashupload\.com|"""
+     r"filebin\.net|gofile\.io|catbox\.moe|ix\.io|dpaste\.(?:com|org)|pastebin\.com|hastebin\.com|paste\.ee|ter"
+     r"mbin\.com|uguu\.se|tmpfiles\.org)\b|(?<=//)(?:transfer\.sh|temp\.sh|paste\.rs)\b|(?<![\w./@-])(?:transfe"
+     r"r\.sh|temp\.sh|paste\.rs)/))|\b(?:nc|ncat|netcat)\b[^;\n]*\btermbin\.com\b",
+     "Отправка на сервис-ловушку запросов или публичный файлообменник — данные станут доступны чужим", "Используйте свой тестовый сервер или приватное хранилище компании"),
+    ("llm-upload", CRITICAL, "leak",
+     r"\b(?:curl|wget|Invoke-RestMethod|irm|Invoke-WebRequest|iwr)\b(?=[^;\n]*\b(?:api\.anthropic\.com|api\.ope"
+     r"nai\.com|generativelanguage\.googleapis\.com|api\.mistral\.ai|api\.cohere\.(?:ai|com)|api\.groq\.com|api"
+     r"\.deepseek\.com|openrouter\.ai|api\.together\.xyz|api\.x\.ai|chatgpt\.com|chat\.openai\.com)\b)(?=[^;\n]"
+     r"""*(?:\s(?-i:-[FT])(?:\s|['"]?[\w.-]*=)|\s--(?:upload-file|post-file|body-file|form(?!-string))\b|\s(?:(?-"""
+     r"""i:-d)\s*|--data(?:-binary|-urlencode)?[=\s]+)['"]?(?:\w+=)?@|\s-(?:InFile|Form)\b))(?=[^;\n]*\bsk-(?:ant"""
+     r"-|proj-)?[\w-]{20,})",
+     "Файл уходит в ИИ-API под вписанным в команду (возможно чужим) ключом", "Не выполнять; ключ должен браться из своей переменной окружения"),
+    ("llm-upload", HIGH, "leak",
+     r"\b(?:curl|wget|Invoke-RestMethod|irm|Invoke-WebRequest|iwr)\b(?=[^;\n]*\b(?:api\.anthropic\.com|api\.ope"
+     r"nai\.com|generativelanguage\.googleapis\.com|api\.mistral\.ai|api\.cohere\.(?:ai|com)|api\.groq\.com|api"
+     r"\.deepseek\.com|openrouter\.ai|api\.together\.xyz|api\.x\.ai|chatgpt\.com|chat\.openai\.com)\b)(?=[^;\n]"
+     r"""*(?:\s(?-i:-F|-T)\s|\s--form\b|\s--upload-file\b|\s--data-binary\s+['"]?@|\s(?-i:-d)\s*['"]?@|\s--data\s"""
+     r"""+['"]?@|\s-InFile\b))""",
+     "Локальный файл (код, документ, запись) отправляется стороннему ИИ-сервису", "Убедитесь, что файл можно выносить из компании; используйте одобренный корпоративный ИИ"),
+    ("pub-repo-api", HIGH, "public",
+     r"\b(?:gh\s+api|curl|wget|Invoke-RestMethod|irm|Invoke-WebRequest|iwr)\b(?![^;\n]*\s(?:-X\s*|--?method[=\s"
+     r"""]+)['"]?GET\b)(?=[^;\n]*\s(?:(?:-X\s*|--?method[=\s]+)['"]?(?:POST|PATCH|PUT)\b|(?-i:-[fFd])\s|--(?:fiel"""
+     r"d|raw-field|data\S*|input)\b|-Body\b))(?=[^;\n]*(?:/user/repos\b|/orgs/[\w.-]+/repos\b|\brepos/[\w.-]+/["
+     r"""\w.-]+))(?=[^;\n]*\b(?:private['"]?\s*[:=]\s*['"]?false\b|visibility['"]?\s*[:=]\s*['"]?public\b))|\bcre"""
+     r"ateRepository\b[^;\n]*\bvisibility\s*:\s*PUBLIC\b|\bgh\s+gist\s+(?:create|new)\b(?![^;\n]*\s(?:--public|"
+     r"-p)\b)|\bgit\s+(?:remote\s+add|push)\b[^;\n]*gist\.github\.com|(?:^|[;&|(]\s*|\b(?:npx|bunx|pnpm\s+dlx)\s"
+     r"+(?:-y\s+)?)gitshot\b|\bgh\s+shot\b",
+     "Публичный репозиторий через API, гист или загрузчик скриншотов — данные откроются всем", "Создавайте приватно в организации компании; скриншоты прикладывайте вручную"),
+    ("git-no-verify", HIGH, "git",
+     r"\bgit\s+(?:-c\s+\S+\s+)*(?:commit|push|merge|am|cherry-pick|rebase)\b[^;\n|&]*\s--no-verify\b|\bgit\s+(?"
+     r":-c\s+\S+\s+)*commit\b[^;\n|&]*\s-(?-i:[aeimpqsvz]*n[aeimpqsvz]*)(?=\s|$)|\bgit\s+(?:-c\s+\S+\s+)*-c\s+["
+     r"""'"]?core\.hooksPath=|\bgit\s+config\b[^;\n|&]*(?:--unset\b[^;\n|&]*\bcore\.hooksPath\b|\bcore\.hooksPath"""
+     r"""\s+['"]?(?:/dev/null|NUL\b))|\bHUSKY=['"]?0\b[^;\n|&]*\bgit\s+(?:commit|push)\b|\bSKIP=[\w,-]*(?:gitleak"""
+     r"s|ggshield|detect-secrets|trufflehog)\b",
+     "Агент отключает git-хуки — проверка секретов перед коммитом не сработает", "Исправьте причину падения хука вместо его отключения"),
+    ("git-add-secret-ext", HIGH, "git",
+     r"""\bgit\s+add\b[^;\n|&]*(?:\.pypirc\b|\.netrc\b|\.git-credentials\b|\.tfstate\b|[\\/\s'"]kubeconfig(?:[-_]"""
+     r"""[\w-]+)?(?:\.ya?ml)?(?=\s|$|['"])|\.kube[\\/]config\b|id_ed25519\b(?!\.pub)|id_ecdsa\b(?!\.pub)|\.pfx\b|"""
+     r"\.jks\b|\.p8\b|service[-_]?account(?![\w.-]*(?:example|sample|template|schema))[\w.-]*\.json\b|\.tfvars\b"
+     r"(?!\.(?:example|sample|template|dist)))",
+     "В git добавляется файл с секретами (state Terraform, kubeconfig, ключ, сервисный аккаунт)", "Добавьте файл в .gitignore, храните в secret manager"),
+    ("install-git-ref", HIGH, "exec",
+     r"""\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)\b[^;\n|&]*\s['"]?(?:github:|gitlab:|bitbucket:|git\+(?:https"""
+     r"?|ssh)://|git://|(?<![@\w./:-])[\w-][\w.-]*/[\w.-]+#[\w.-]+)|\b(?:npx|bunx|pnpm\s+dlx|yarn\s+dlx)\b[^;\n"
+     r"""|&]*?[\s=]['"]?(?:github:|gitlab:|bitbucket:|git\+|(?<![@\w./:-])[\w-][\w.-]*/[\w.-]+#)|\b(?:pip3?|uv\s+"""
+     r"""pip|pipx|uv|poetry)\s+(?:install|add)\b[^;\n|&]*[\s'"@]git\+|\buvx\s+--from\s+['"]?git\+""",
+     "Установка пакета из git-коммита: его install-скрипты выполнятся без ревью", "Ставьте опубликованную версию из реестра по lock-файлу"),
+    ("mcp-add", HIGH, "exec",
+     r"\b(?:claude|codex|gemini|qwen|cursor-agent|amp|kiro-cli|q)\s+mcp\s+(?:add|add-json|add-from-claude-deskt"
+     r"""op|import)\b|>>?\s*['"]?[^\s'"|;&]*(?:\.mcp\.json|[\\/]mcp\.json|claude_desktop_config\.json)\b""",
+     "Агент подключает новый MCP-сервер — его код будет работать мимо проверок TwoKey", "MCP-серверы подключает человек после проверки команды"),
+    ("mcp-config-file", HIGH, "files",
+     r"\A(?:[^\n]*[\\/])?(?:\.mcp\.json|\.[\w-]+(?:[\\/]settings)?[\\/]mcp\.json|mcp_config\.json|claude_deskto"
+     r"p_config\.json|\.claude\.json|\.(?:gemini|qwen)[\\/]settings\.json)\s*$|\A(?:[^\n]*[\\/])?\.continue[\\/"
+     r"]mcpServers[\\/]",
+     "Агент правит конфиг MCP-серверов — команда сервера запустится без вопроса", "Конфиги MCP меняет только человек"),
+    ("mcp-config-file", HIGH, "exec",
+     r"(?:>>?\s*|\btee\s+(?:-a\s+)?|\b(?:Set-Content|Add-Content|Out-File)\s+(?:-(?:Path|FilePath|LiteralPath)\s"
+     r"""+)?)['"]?(?:[^\s'"]*[\\/])?(?:\.mcp\.json|\.[\w-]+[\\/]mcp\.json|mcp_config\.json|claude_desktop_config\."""
+     r"json|\.claude\.json)(?![\w.-])",
+     "Агент правит конфиг MCP-серверов — команда сервера запустится без вопроса", "Конфиги MCP меняет только человек"),
+    ("agent-autoapprove", HIGH, "files",
+     r"""\bchat\.tools\.(?:[\w-]+\.){0,2}autoApprove["']?\s*:\s*(?:true\b|\{[^}]{0,300}:\s*true\b)|["']task\.allo"""
+     r"""wAutomaticTasks["']\s*:\s*["']on["']|["']defaultMode["']\s*:\s*["']bypassPermissions["']|["']enableAllPr"""
+     r"""ojectMcpServers["']\s*:\s*true\b""",
+     "Агент включает себе автоодобрение команд (YOLO-режим)", "Режим подтверждений меняет только человек"),
+    ("autorun-file", HIGH, "files",
+     r"""["']runOn["']\s*:\s*["']folderOpen["']|<key>RunAtLoad</key>\s*<true\s*/>|^\s*X-GNOME-Autostart-enabled\s"""
+     r"*=\s*true|\A[^\n]*[\\/](?:Library[\\/]Launch(?:Agents|Daemons)|\.config[\\/]autostart|Start Menu[\\/]Pro"
+     r"grams[\\/]Startup)[\\/]",
+     "Автозапуск: команда выполнится при открытии папки или входе в систему", "Запускайте задачи вручную; автозапуск добавляет только человек"),
+    ("gha-secrets-dump", CRITICAL, "files",
+     r"\btoJSON\(\s*secrets\s*\)",
+     "Workflow выгружает все секреты репозитория разом", "Передавайте в шаг только нужный секрет: secrets.NAME"),
+    ("key-sas", HIGH, "key",
+     r"""\bsv=\d{4}-\d{2}-\d{2}\b[^\s'"<>]{0,300}?[?&]sig=[A-Za-z0-9%+/]{20,}|[?&]sig=[A-Za-z0-9%+/]{20,}[^\s'"<>"""
+     r"]{0,300}?[?&]sv=\d{4}-\d{2}-\d{2}\b",
+     "Ссылка Azure SAS с подписью — это ключ доступа к хранилищу", "Выдавайте короткоживущий SAS только на чтение и не кладите его в код"),
+    ("sas-generate", HIGH, "public",
+     r"\baz\s+storage\s+account\s+generate-sas\b|\baz\s+storage\s+(?:container|blob|share|file|fs)\s+generate-s"
+     r"""as\b[^;\n]*\s--permissions[=\s]+['"]?[a-z]*[acwdxy]""",
+     "SAS на весь аккаунт или с правом записи/удаления — доступ к данным по ссылке", "SAS на один контейнер, только чтение, срок — часы"),
+    ("rls-off", HIGH, "files",
+     r'\bdisable\s+row\s+level\s+security\b|\bcreate\s+policy\b(?![^;]{0,600}?\bto\s+"?(?:service_role|postgres'
+     r'|supabase_admin)"?(?:\s*,\s*"?(?:service_role|postgres|supabase_admin)"?)*\s+(?:using|with)\b)(?![^;]{0,'
+     r"300}?\bfor\s+select\b)[^;]{0,400}?\b(?:using|with\s+check)\s*\(\s*true\s*\)|\bgrant\s+(?:[a-z_]+(?:\s*\("
+     r'[^)]{0,60}\))?\s*,\s*)*(?:all|insert|update|delete|truncate)\b[^;]{0,200}?\bto\s+(?:[\w"]+\s*,\s*)*"?(?:'
+     r"anon|public)\b",
+     "Миграция отключает RLS или даёт всем право менять таблицу", "Включите RLS и пишите политики с условием auth.uid()"),
+    ("firebase-public", HIGH, "files",
+     r"\ballow\s+(?:[a-z]+\s*,\s*)*(?:write|create|update|delete)\b(?:\s*,\s*[a-z]+)*\s*(?::\s*if\s+true\s*)?;|"
+     r"\bmatch\s+/?\{\w+=\*\*\}\s*\{\s*allow\s+[a-z, ]{1,40}(?::\s*if\s+true\s*)?;|\bif\s+request\.time\s*<\s*t"
+     r"""imestamp\.date\(|["']\.write["']\s*:\s*(?:true|["']true["'])|["']rules["']\s*:\s*\{\s*["']\.read["']\s*:"""
+     r"""\s*(?:true|["']true["'])|\ballow\s+(?:read|get|list)(?:\s*,\s*(?:read|get|list))*\s*(?::\s*if\s+true\s*)"""
+     r"""?;|["']\.read["']\s*:\s*(?:true|["']true["'])""",
+     "Правила Firebase открывают базу или хранилище всем без авторизации", "Проверяйте request.auth и владельца данных в правилах"),
+    ("public-env-secret", HIGH, "files",
+     r"(?-i:\b(?:NEXT_PUBLIC|VITE|REACT_APP|EXPO_PUBLIC|NUXT_PUBLIC|GATSBY|PUBLIC)_\w*?(?:SERVICE_ROLE(?:_KEY)?"  # конец имени:
+     r"|SECRET(?:_(?:ACCESS_)?KEY|_TOKEN)?|PRIVATE_KEY|PASSWORD|PASSWD|DATABASE_URL|DB_URL|OPENAI_API_KEY"  # не *_PASSWORD_URL
+     r"|ANTHROPIC_API_KEY)\b)",
+     "Секрет в публичной переменной окружения попадёт в код браузера", "Держите секрет на сервере; во фронтенд — только публичные ключи"),
+    ("key-supabase", HIGH, "key",
+     r"""\bsb_secret_[A-Za-z0-9_-]{20,}|(?:\b|_)(?:SERVICE_ROLE(?:_KEY)?|SUPABASE_SERVICE_KEY)["']?\s*[:=]\s*["']"""
+     r"?eyJ[\w-]{10,}\.eyJ[\w-]{10,}\.[\w-]{10,}",
+     "Ключ Supabase service_role обходит RLS — полный доступ к базе", "Только на сервере через переменные окружения; клиенту — anon/publishable"),
+    ("sql-secret-read", HIGH, "db",
+     r'\bselect\b(?!\s+count\s*\()[^;]{0,200}?\bfrom\s+["`\[]?(?:\w+["`\]]?\.["`\[]?)?(?:\w*_)?(?:(?:integratio'
+     r"n|oauth|access|refresh|api|auth|session|service|personal_access|bearer)_?tokens?|secrets?|credentials?|a"
+     r'pi_?keys?|passwords?|private_?keys?)["`\]]?(?=\s|;|$|\)|,)',
+     "Агент читает таблицу с токенами или паролями — секреты попадут в контекст модели", "Смотрите структуру или COUNT(*), а не значения секретов"),
+    ("api-delete", CRITICAL, "infra",
+     r"\bmutation\b[^;\n]{0,400}?\b(?:volume|database|project|environment|service|cluster|backup|snapshot|bucke"
+     r"t|instance)_?(?:delete|destroy|remove|drop)\b|\bmutation\b[^;\n]{0,400}?\b(?:delete|destroy|remove|drop)"
+     r"_?(?:volume|database|project|environment|service|cluster|backup|snapshot|bucket|instance)s?\b|\brailway\s"
+     r"+(?:volume|environment|service|project)\s+(?:delete|rm|remove)\b",
+     "API-вызов удаляет том, базу, проект или бэкапы облачной платформы", "Проверьте ID и окружение, сделайте снапшот; удаляйте вручную в консоли"),
+    ("api-delete", HIGH, "infra",
+     r"\bmutation\b[^;\n]{0,400}?\b\w{0,40}(?:delete|destroy|remove|purge|wipe|terminate)\w{0,40}\s*\(|\b(?:cur"
+     r"""l|Invoke-RestMethod|irm|Invoke-WebRequest|iwr)\b(?=[^;\n]*(?:\s-X\s*['"]?DELETE\b|\s--request[=\s]+['"]?"""
+     r"""DELETE\b|\s-Method[=\s:]+['"]?Delete\b))""",
+     "Удаление через API удалённого сервиса (не локального)", "Проверьте адрес, окружение и ID ресурса; держите бэкап"),
+    ("aws-delete", CRITICAL, "infra",
+     r"\baws\s+(?:--[\w-]+(?:[=\s]+(?!-)\S+)?\s+){0,4}(?:cloudformation\s+delete-stack|eks\s+delete-cluster|ecs"
+     r"\s+delete-cluster|elasticache\s+delete-(?:replication-group|cache-cluster)|backup\s+delete-(?:backup-vau"
+     r"lt|recovery-point)|ec2\s+delete-(?:snapshot|volume|vpc)|efs\s+delete-file-system|redshift\s+delete-clust"
+     r"er|docdb\s+delete-db-cluster|opensearch\s+delete-domain|kms\s+schedule-key-deletion|route53\s+delete-hos"
+     r"ted-zone)\b|\b(?:Remove-(?:CFNStack|EKSCluster|ECSCluster|EC2Snapshot|EC2Volume|EC2Vpc|EFSFileSystem|R53"
+     r"HostedZone)|Request-KMSKeyDeletion)\b",
+     "Удаление стека, кластера, бэкапов или снапшотов AWS", "Снапшот, проверка аккаунта и региона; удаление — человеком"),
+    ("mcp-outbound", HIGH, "tool",
+     r"__(?!.*__)(?!(?:get|list|search|read|fetch|find|describe|query|count)[_-])(?:[\w-]*[_-])?(?:forward|repl"
+     r"y|upload|grant|push_files|create_or_update_file|create_(?:repository|repo|gist)|update_gist|add_collabor"
+     r"ator|add_member|(?:update|set|change)_(?:file_)?(?:permissions?|sharing|visibility|acl))(?:[_-]|$)",
+     "MCP-инструмент пересылает, загружает, публикует или выдаёт доступ к данным", "Проверьте получателя, содержимое и кому откроется доступ"),
+    ("mcp-trash", HIGH, "tool",
+     r"(?:^|_|-)trash(?:_|-|$)",
+     "Агент перемещает письма или файлы в корзину — массово это потеря данных", "Сначала покажите список, удаляйте небольшими партиями после согласия"),
+    ("mcp-pr", MEDIUM, "tool",
+     r"(?:^|_|-)(?:create_(?:pull_request|issue|pr|comment)|add_(?:issue_)?comment)(?:_|-|$)",
+     "Публикация PR или задачи — в открытом репозитории текст увидят все", "Проверьте репозиторий и что в тексте нет приватных данных"),
+    ("crypto-transfer", CRITICAL, "money",
+     r"\b(?:spl-token\s+(?:transfer|burn|close)|solana\s+transfer|bitcoin-cli\b[^;\n]*\s(?:sendtoaddress|sendma"
+     r"ny|sendall)|cast\s+send|sui\s+client\s+(?:transfer|pay)\w*|aptos\s+account\s+transfer|electrum\s+payto)\b"
+     r"""(?![^;\n]*\s(?:--url|-u|--rpc-url|-r|--network|--chain)[=\s]+['"]?[^\s'"]*?(?:devnet|testnet|localnet|lo"""
+     r"calhost|127\.0\.0\.1|anvil))",
+     "Перевод криптовалюты в основной сети — необратимо", "Сначала devnet/testnet; сумму и адрес подтверждает человек"),
+    ("wipe-root", CRITICAL, "fs",
+     r"\b(?:Remove-Item|ri|del|erase|rmdir|rd|rm)\b(?=[^;\n|&]*\s(?:[-–—](?!force\b)(?:rec\w*|[a-z]{0,3}r[a-z]{"
+     r"""0,3})\b|--recursive\b|/s\b))[^;\n|&]*\s['"]?(?:[a-z]:[\\/]*\*?|[a-z]:[\\/]+users[\\/]+[^\\/\s'"]+[\\/]*\*"""
+     r"""?|(?:/mnt)?/[a-z]/users/[^/\s'"]+/?\*?|/mnt/[a-z]/?\*?|/(?:home|users)/[^/\s'"]+/?\*?|%userprofile%[\\/]"""
+     r"""*\*?|\$env:userprofile[\\/]*\*?|\$home[\\/]*\*?|~[\\/]*\*?)['"]?(?=\s|$|;|&|\|)""",
+     "Рекурсивное удаление корня диска или домашней папки пользователя", "Удаляйте конкретную папку проекта, сначала выведите список"),
+    ("db-expose", HIGH, "public",
+     r"\bufw\s+allow\s+(?:8123|9000|9440|9042|5984|2375|2376|11434|6333|19530|9092|1433|1521|7474|7687|8086|237"
+     r"9|5601|15672)\b|\bfirewall-cmd\b[^;\n]*--add-port[=\s]+(?:5432|3306|6379|27017|9200|8123|9000|9042|5984|"
+     r"""2375|11434|6333|1433|1521)/|\bdockerd\b[^;\n]*-H\s+tcp://0\.0\.0\.0|\bOLLAMA_HOST['"]?[=\s]+['"]?0\.0\.0"""
+     r"\.0",
+     "Порт базы данных, Docker API или ИИ-сервера открывается всей сети", "Слушайте 127.0.0.1, доступ — через VPN/bastion и с паролем"),
+    ("proc-root-evasion", HIGH, "exec",
+     r"/proc/(?:self|thread-self|\d+)/root/",
+     "Путь через /proc/self/root — обход правил, привязанных к путям", "Вызывайте программы обычным путём"),
+    ("shell-rc", HIGH, "exec",
+     r"(?:\b(?:shutdown|reboot|halt|poweroff|curl|wget|ncat|base64|iwr|irm|iex|Invoke-WebRequest|Invoke-RestMet"
+     r"hod|Invoke-Expression)\b|\bnc\s|\brm\s+-[a-z]*r[a-z]*\b|/dev/tcp/)[^;\n]*(?:>>?|\btee\b(?:\s+-\w+)*|\b(?"
+     r""":Add-Content|Set-Content|Out-File)\b(?:\s+-\w+)*)\s*['"]?(?:(?:~|\$HOME|\$\{HOME\}|/root|/home/[^/\s'"]+"""
+     r"""|/Users/[^/\s'"]+)/\.(?:bashrc|bash_profile|bash_login|profile|zshrc|zprofile|zshenv|zlogin)\b|\$PROFILE"""
+     r"\b)|\b(?:Add-Content|Set-Content)\b(?=[^;\n]*\$PROFILE\b)(?=[^;\n]*\b(?:iwr|irm|iex|Invoke-WebRequest|In"
+     r"voke-RestMethod|Invoke-Expression|curl|wget|shutdown)\b)",
+     "В файл запуска оболочки дописывается опасная команда — сработает в каждом терминале", "Не меняйте ~/.bashrc и $PROFILE; покажите строку человеку"),
 ]
 class _Rx:
     """Регэксп правила собирается при первом использовании: хук на Read/Grep не тратит ~0,2 с на все правила сразу."""
@@ -320,7 +541,7 @@ MASK_RX = [  # только для маскировки, вдобавок к KEY
 ]
 SECRET_FIELD = re.compile(r"passw|secret|token|api[_-]?key|credential|private[_-]?key", re.I)  # MCP: {"password": …}
 PROD = re.compile(r"\bprod(uction)?\b|[-_.]prod\b|\bprod[-_.]|\bпрод", re.I)
-SELF_PATH = re.compile(r"\.claude\.*[\\/]+(settings[\w.]*\.json$|hooks[\\/])", re.I)  # настройки и хуки Claude Code
+SELF_PATH = re.compile(r"\.claude\.*[\\/]+(settings[\w.]*\.json$|hooks[\\/])", re.I)  # настройки и хуки агента
 CLAUDE_CWD = re.compile(r"[\\/]\.claude\.*([\\/]+hooks)?[\\/]*$", re.I)  # агент работает прямо в папке настроек Claude
 HOME_DIR = os.path.normcase(os.path.realpath(HERE))
 MAX_SCAN = 16000  # ponytail: регэкспы вида [^;\n]* квадратичны; длиннее — сканируем голову и хвост и зовём человека
@@ -339,6 +560,28 @@ PROSE = {"Agent", "Task", "Workflow", "WebSearch", "WebFetch", "AskUserQuestion"
 SHELL_SCRIPT = re.compile(r"\.(sh|bash|zsh|ps1|psm1|bat|cmd)$|(^|[\\/])(Makefile|justfile|package\.json)$|[\\/]\.git[\\/]+hooks[\\/]", re.I)
 SHEBANG = re.compile(r"#!.*\b((ba|z|da|k)?sh|pwsh)\b")  # bin/reset без расширения, но с #!/bin/bash
 CODE_FILE = re.compile(r"\.(py|js|mjs|cjs|ts)$", re.I)  # в коде команды — в журнал, без вопроса (иначе шум)
+# Категория files — настройки, которые открывают данные или запускают код: смотрим содержимое записываемых файлов.
+DOC_FILE = re.compile(r"\.(md|mdx|rst|adoc|txt)$", re.I)  # описать опасную настройку в документации — не значит включить её
+FILE_SCOPE = {  # на какие файлы действует правило
+    "firebase-public": re.compile(r"(^|/)[\w.-]*\.rules(\.json)?$", re.I),
+    "agent-autoapprove": re.compile(r"\.(json|jsonc|code-workspace)$", re.I),
+    "autorun-file": re.compile(r"\.(json|jsonc|plist|desktop)$|/(?:Library/Launch(?:Agents|Daemons)|\.config/autostart"
+                               r"|Start Menu/Programs/Startup)/", re.I),
+    "gha-secrets-dump": re.compile(r"\.ya?ml$", re.I),
+}
+FILE_PATH_RULES = {"mcp-config-file"}  # опасен сам путь: это конфиг, откуда агент запускает программы
+FILE_AND_SHELL = {"rls-off"}  # SQL из миграции и он же в psql -c
+FILE_SCAN = 200_000  # ponytail: у больших файлов смотрим начало и конец
+WIPE_WORD = re.compile(r"[a-z]:[\\/]*\*?|[a-z]:[\\/]+users[\\/]+[^\\/]+[\\/]*\*?|(?:/mnt)?/[a-z]/users/[^/]+/?\*?|/mnt/[a-z]/?\*?"
+                       r"|/(?:home|users)/[^/]+/?\*?|%userprofile%[\\/]*\*?|\$env:userprofile[\\/]*\*?|\$home[\\/]*\*?|~[\\/]*\*?",
+                       re.I)  # целое слово команды: корень диска или дом
+_LOCAL = r"(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)(?:[:/\s'\"]|$)"
+LOCAL_URL = re.compile(r"(?:^|[\s'\"]|--url=)(?:https?://)?" + _LOCAL, re.I | re.M)  # адрес как отдельное слово, а не ?host=localhost
+OUTER_URL = re.compile(r"https?://(?!" + _LOCAL + r")[\w\[]", re.I)
+TARGET_KEYS = ("file_path", "notebook_path", "path", "relative_path", "filepath", "file", "filename", "destination", "dest", "target")
+# MCP-инструмент только читает: read_file, get_rules, search_docs. Неизвестные считаем пишущими — так безопаснее
+MCP_READ = re.compile(r"(?:read|get|list|search|find|fetch|describe|show|view|grep|glob|stat|count)(?:_|$)"
+                      r"(?!.*(?:write|edit|create|update|set|save|put|delete|remove|replace))", re.I)
 
 
 # ------------------------------------------------- свои шаблоны и отключение ---
@@ -467,9 +710,11 @@ def _leaves(x):
 
 
 def _plain(path):
-    """Путь так, как его поймёт Claude Code и Windows: `file::$DATA`, хвостовые точки, префиксы \\\\?\\ и \\\\.\\
+    """Путь так, как его поймут агент и Windows: `file::$DATA`, хвостовые точки, префиксы \\\\?\\ и \\\\.\\
     снимаем, ~ и /c/… (Git Bash) раскрываем."""
-    p = re.sub(r"(::\$\w+|:[\w$]+)$", "", path.strip()).rstrip(". ")
+    p = re.sub(r"(::\$\w+|:[\w$]+)$", "", path.strip())
+    if not re.search(r"(^|[\\/])\.\.?[\\/]*$", p):  # «.» и «..» — настоящие папки: точки снимаем только в конце имени
+        p = p.rstrip(". ")
     p = re.sub(r"^[\\/]{2}[?.][\\/](UNC[\\/])?", lambda m: "\\\\" if m.group(1) else "", p)
     if os.name == "nt" and re.match(r"/[a-z](/|$)", p, re.I):
         p = p[1] + ":" + (p[2:] or "/")
@@ -491,7 +736,7 @@ def in_home(path, cwd=""):
 
 
 def self_target(path, cwd=""):
-    """Путь — настройки и хуки Claude Code или папка TwoKey?"""
+    """Путь — настройки и хуки агента или папка TwoKey?"""
     return bool(SELF_PATH.search(_plain(path))) or in_home(path, cwd)
 
 
@@ -507,7 +752,7 @@ def evaluate(tool, inp, cwd=""):
         found.append({"id": rid, "severity": sev, "why": why, "fix": fix, "hit": mask(hit)[:150]})
 
     if cwd and (in_home(cwd) or CLAUDE_CWD.search(cwd)):  # агент открыт прямо в папке TwoKey или настроек Claude
-        add("self", CRITICAL, "Агент работает в папке TwoKey или настроек Claude Code",
+        add("self", CRITICAL, "Агент работает в папке TwoKey или в настройках агента",
             "Эти папки меняет только человек", cwd)
         return CRITICAL, found
     if tool in READ_ONLY:  # чтение безопасно — кроме папки TwoKey: там токен бота и журнал
@@ -536,6 +781,8 @@ def evaluate(tool, inp, cwd=""):
             add("long", HIGH, "Очень длинное действие: середину правила не проверяли", "Попросите агента разбить действие на шаги")
     if shell:
         text = normalize(text)
+        if inp.get("dangerouslyDisableSandbox"):  # обход песочницы — отдельным полем, в тексте команды его не видно
+            add("sandbox-off", HIGH, "Агент запускает команду без песочницы", "Оставьте песочницу; без неё — только осознанно")
     if writes and (self_target(path, cwd) or SELF_RX.search(path)):
         add("self", CRITICAL, "Агент правит настройки собственной защиты", "Настройки защиты меняет только человек", path)
     elif not writes and not shell:  # MCP-инструменты записи (write_file, move…) — по любому пути в параметрах
@@ -550,6 +797,16 @@ def evaluate(tool, inp, cwd=""):
             hay = tool_words if tool.startswith("mcp__") else ""
         elif cat == "key":
             hay = full
+        elif cat == "files":
+            target = next((str(inp[k]) for k in TARGET_KEYS if isinstance(inp.get(k), str) and inp[k]), "").replace("\\", "/")
+            scope = FILE_SCOPE.get(rid)
+            if (prose or (shell and rid not in FILE_AND_SHELL) or DOC_FILE.search(target) or (scope and not scope.search(target))
+                    or (tool.startswith("mcp__") and MCP_READ.match(tool_words.rsplit("__", 1)[-1]))):
+                continue
+            hay = target if rid in FILE_PATH_RULES else text if len(text) <= FILE_SCAN else (
+                text[:FILE_SCAN // 2] + "\n" + text[-FILE_SCAN // 2:])
+            if rid == "autorun-file":  # опасна и сама папка автозапуска: путь — первой строкой
+                hay = target + "\n" + hay
         elif prose or (writes and cat != "custom-files" and not script):
             continue  # текст для людей и моделей — не команда; написать файл с "DROP TABLE" ≠ выполнить его
         else:
@@ -557,7 +814,13 @@ def evaluate(tool, inp, cwd=""):
         m = rx.search(hay)
         if not m:
             continue
-        if writes and cat not in ("key", "custom-files") and not shell_script and not (cat == "self" and SELF_RX.search(m.group(0))):
+        if rid == "wipe-root" and shell and isinstance(inp.get("command"), str):
+            words = [w for part, _ in shell_parts(inp["command"][:MAX_SCAN], "") for w in part]
+            if any(re.search(r"\s", w) for w in words) and not any(WIPE_WORD.fullmatch(w) for w in words):
+                continue  # "C:\Users\John Doe\app": пробел в кавычках — часть пути, а не конец папки пользователя
+        if rid == "api-delete" and shell and LOCAL_URL.search(hay) and not OUTER_URL.search(hay):
+            continue  # запрос к своему локальному серверу
+        if writes and cat not in ("key", "custom-files", "files") and not shell_script and not (cat == "self" and SELF_RX.search(m.group(0))):
             sev = min(sev, MEDIUM)  # команды внутри кода (.py/.js): в журнал; но код, лезущий в папку TwoKey, — к человеку
         if cat == "key":
             if writes and ENV_FILE.search(path):
@@ -659,8 +922,231 @@ def judge(tool, inp, found):
             "alternatives": lst("alternatives")}
 
 
+# ------------------------------------------------- секреты, уходящие в git ---
+# `git add -A && git commit && git push` по тексту команды не выдаёт, ЧТО уходит. Сервер смотрит сам: индекс, файлы под
+# git add / commit -a и коммиты, которых ещё нет на сервере. Только на сервере: хук не запускает программы из папки агента.
+GIT_SEND = re.compile(r"\bgit\b[^;&|\n]{0,300}?\s(?:commit|push)\b", re.I)  # грубо, кого отдать серверу; точно разбирает git_calls()
+GIT_VALUE_OPTS = {"-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env", "--attr-source"}
+COMMIT_VALUE_OPTS = {"--message", "--file", "--reuse-message", "--reedit-message", "--fixup", "--squash", "--author", "--date",
+                     "--template", "--trailer", "--cleanup"}
+SAFE_REV = re.compile(r"[\w.][\w./@^~{}+-]*")
+SECRET_FILE = re.compile(r"(^|/)(id_(rsa|dsa|ecdsa|ed25519)|credentials(\.json)?|\.netrc|\.npmrc|\.pypirc"
+                         r"|[^/]+\.(pem|p12|pfx|jks|keystore|tfstate(\.backup)?))$", re.I)
+GIT_SCAN_BYTES, GIT_SCAN_FILES, GIT_SCAN_FILE_BYTES = 2_000_000, 300, 1_000_000  # ponytail: дальше не смотрим
+
+
+def git_output(repo, *args):
+    """git в чужом репозитории — без кода из его настроек: ни fsmonitor, ни внешних diff и textconv, ни проверки подписей,
+    ни подкачки по сети. Путь к git — только из абсолютных папок PATH: git.exe, подложенный в проект, не запустится."""
+    import subprocess
+    name = "git.exe" if os.name == "nt" else "git"
+    exe = next((p for d in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(d)
+                for p in [os.path.join(d, name)] if os.path.isfile(p)), None)
+    if not exe:
+        return ""
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+    env.update(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+    cmd = [exe, "-C", repo, "--no-pager", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+           "-c", "log.showSignature=false", "-c", "core.quotePath=false", "-c", "submodule.recurse=false",
+           "-c", "diff.submodule=short", "-c", "diff.ignoreSubmodules=all", *args]  # в подмодулях свои настройки: туда не заходим
+    with subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, cwd=HERE,
+                          creationflags=0x08000000 if os.name == "nt" else 0) as p:  # CREATE_NO_WINDOW
+        timer = threading.Timer(4, p.kill)
+        timer.start()
+        try:
+            return p.stdout.read(GIT_SCAN_BYTES).decode("utf-8", "replace")
+        finally:
+            timer.cancel()
+            p.kill()
+
+
+def git_calls(cmd, cwd):
+    """git-команды из строки → [(папка, подкоманда, аргументы)] с учётом cd и git -C."""
+    calls = []
+    for words, cur in shell_parts(cmd, cwd):
+        i = next((n for n, w in enumerate(words) if re.fullmatch(r"(?:.*[\\/])?git(?:\.exe)?", w, re.I)), None)
+        if i is None:
+            continue
+        i += 1
+        while i < len(words) and words[i].startswith("-"):
+            opt, i = words[i], i + 1
+            if opt == "-C" and i < len(words):
+                cur, i = os.path.normpath(os.path.join(cur, _plain(words[i]))), i + 1
+            elif opt in GIT_VALUE_OPTS:
+                i += 1
+        if i < len(words):
+            calls.append((cur, words[i].lower(), words[i + 1:]))
+    return calls
+
+
+def staged_paths(sub, args):
+    """Что git add / git commit возьмёт из рабочей папки → (пути, новые файлы тоже?); пустые пути — весь репозиторий.
+    None — из рабочей папки ничего: обычный commit берёт только индекс."""
+    paths, every, tracked, i = [], False, sub == "commit", 0
+    while i < len(args):
+        w, i = args[i], i + 1
+        if w == "--":
+            paths += args[i:]
+            break
+        if w.startswith("--"):
+            name, eq, _ = w.partition("=")
+            if name == "--dry-run":
+                return None
+            if name == "--pathspec-from-file":  # список в файле не читаем: считаем, что берут всё
+                every, i = True, i + (not eq)
+            elif name == "--all" or (sub != "commit" and name == "--no-ignore-removal"):
+                every = True
+            elif sub != "commit" and name == "--update":
+                every, tracked = True, True
+            elif sub == "commit" and name in COMMIT_VALUE_OPTS and not eq:
+                i += 1
+        elif w.startswith("-") and len(w) > 1:
+            for n, ch in enumerate(w[1:], 1):
+                if sub != "commit":
+                    if ch == "n":
+                        return None
+                    every, tracked = every or ch in "Au", tracked or ch == "u"
+                elif ch in "mFcCt":  # значение приклеено или идёт следующим словом
+                    i += not w[n + 1:]
+                    break
+                elif ch in "uS":
+                    break
+                elif ch == "a":
+                    every = True
+        else:
+            paths.append(w)
+    return (paths, not tracked) if every or paths else None
+
+
+def repo_specs(paths, here, repo):
+    """Пути из команды → pathspec от корня репозитория; [] — весь репозиторий, None — все пути вне его."""
+    if not paths or any(p.startswith(":") for p in paths):  # магия pathspec: считаем, что берут всё
+        return []
+    real, out = os.path.realpath(here), []
+    for p in paths:
+        rel = os.path.relpath(os.path.join(real, _plain(p)), repo).replace(os.sep, "/")
+        if rel != ".." and not rel.startswith("../"):
+            out.append(rel)
+    return ["--", *out] if out else None
+
+
+def push_revs(args, repo):
+    """Что отправит git push → (имя удалённого репозитория, ревизии для git log); None — ничего не отправит."""
+    pos, revs, i = [], [], 0
+    while i < len(args):
+        w, i = args[i], i + 1
+        if w == "--":
+            pos += args[i:]
+            break
+        name = w.partition("=")[0]
+        if name in ("--dry-run", "-n", "--delete", "-d"):
+            return None
+        if name in ("--all", "--branches"):
+            revs.append("--branches")
+        elif name == "--mirror":
+            revs.append("--all")
+        elif name == "--tags":
+            revs.append("--tags")
+        elif name in ("-o", "--push-option", "--repo", "--receive-pack", "--exec"):
+            i += "=" not in w
+        elif not w.startswith("-"):
+            pos.append(w)
+    remote = pos[0] if pos else git_output(repo, "rev-parse", "--abbrev-ref", "@{push}").strip().partition("/")[0] or "origin"
+    for ref in pos[1:]:
+        src = ref.lstrip("+").partition(":")[0]
+        if src:  # «:ветка» — удаление, содержимое не уходит
+            ok = SAFE_REV.fullmatch(src) and git_output(repo, "rev-parse", "--verify", "-q", src + "^{commit}").strip()
+            revs.append(src if ok else "--branches")  # маска или переменная: смотрим все ветки
+    if len(pos) > 1 and not revs:
+        return None
+    return remote, revs or ["HEAD"]
+
+
+def git_leaks(cmd, cwd):
+    """Что уходит в git и похоже на секрет → находки. Сбой проверки действие не блокирует: это дополнительный слой."""
+    if not GIT_SEND.search(cmd[:MAX_SCAN]):
+        return []
+    repos = {}
+    for here, sub, args in git_calls(cmd[:MAX_SCAN], cwd):
+        if sub in ("commit", "push", "add", "stage") and os.path.isabs(here) and (root := repo_root(here)):
+            repos.setdefault(root, []).append((here, "add" if sub == "stage" else sub, args))
+    added, changed = {}, set()  # файл → добавленные строки; файлы, где правда появилось новое (и бинарные)
+
+    def names(numstat):  # --numstat -z: «добавлено<TAB>удалено<TAB>имя», у бинарных вместо чисел «-»
+        for rec in numstat.split("\0"):
+            count, _, rest = rec.strip("\n").partition("\t")
+            name = rest.partition("\t")[2]
+            if name and count != "0":
+                changed.add(name)
+                added.setdefault(name, [])
+
+    def parse(diff):
+        name = ""
+        for line in diff.split("\n"):
+            if line.startswith("+++ "):
+                name = line[4:].strip().strip('"')
+                name = name[2:] if name.startswith("b/") else name
+                if name != "/dev/null":
+                    added.setdefault(name, [])
+            elif line.startswith("+") and name in added:
+                added[name].append(line[1:])
+
+    show = ("--no-ext-diff", "--no-textconv", "--no-color", "--unified=0", "--ignore-submodules=all")
+    stats = ("--no-ext-diff", "--no-textconv", "--numstat", "-z", "--no-renames", "--ignore-submodules=all")
+
+    def read_worktree(repo, name):  # ещё не в индексе: читаем сам файл — без git, его фильтры выполнили бы чужой код
+        path, data = os.path.join(repo, name), None
+        if os.path.isfile(path) and not os.path.islink(path) and os.path.getsize(path) <= GIT_SCAN_FILE_BYTES:
+            with open(path, "rb") as f:
+                data = f.read()
+        added.setdefault(name, [])
+        if data is not None and b"\0" not in data:
+            added[name].append(data.decode("utf-8", "replace"))
+        if SECRET_FILE.search(name) or ENV_FILE.search(name):  # файл с ключами: уходит, только если правда изменился
+            head = git_output(repo, "cat-file", "blob", f"HEAD:{name}").replace("\r\n", "\n")
+            if data is None or data.decode("utf-8", "replace").replace("\r\n", "\n") != head:
+                changed.add(name)
+
+    try:
+        for repo, items in repos.items():
+            if any(sub == "commit" for _, sub, _ in items):
+                parse(git_output(repo, "diff", "--cached", *show))
+                names(git_output(repo, "diff", "--cached", *stats))
+                for here, sub, args in items:
+                    what = staged_paths(sub, args) if sub != "push" else None
+                    spec = repo_specs(what[0], here, repo) if what else None
+                    if spec is None:
+                        continue
+                    listed = git_output(repo, "diff-index", "--name-only", "-z", "--diff-filter=d", "--ignore-submodules=all", "HEAD", *spec)
+                    if what[1]:
+                        listed += "\0" + git_output(repo, "ls-files", "-z", "--others", "--exclude-standard", *spec)
+                    for name in [n for n in listed.split("\0") if n][:GIT_SCAN_FILES]:
+                        read_worktree(repo, name)
+            for _, sub, args in items:
+                if sub == "push" and (sent := push_revs(args, repo)):
+                    span = ("-n", "50", *sent[1], "--not", f"--remotes={sent[0]}")
+                    parse(git_output(repo, "log", "-p", *show, "--format=", *span))
+                    names(git_output(repo, "log", *stats, "--format=", *span))
+    except (OSError, ValueError) as e:
+        log(f"Проверка git на секреты не удалась: {e}")
+    hits = []
+    keys = [r for r in BUILTIN if r[2] == "key" and r[1] >= HIGH]
+    for name, lines in added.items():
+        m = next((m for r in keys for m in [r[3].search("\n".join(lines))] if m), None)
+        if m or (name in changed and (SECRET_FILE.search(name) or ENV_FILE.search(name))):
+            hits.append(f"{name}: {mask(m.group(0))[:40]}" if m else name)
+    return [{"id": "git-secret", "severity": HIGH, "why": tr("В git уходит секрет или файл с ключами"),
+             "fix": tr("Уберите секрет из файла и из коммита, перевыпустите ключ, добавьте файл в .gitignore"), "hit": h} for h in hits[:5]]
+
+
+def command_leaks(tool, inp, cwd):
+    return git_leaks(inp["command"], cwd) if tool in SHELLS and isinstance(inp, dict) and isinstance(inp.get("command"), str) else []
+
+
 def assess(tool, inp, cwd=""):
     sev, found = evaluate(tool, inp, cwd)
+    if leaks := command_leaks(tool, inp, cwd):
+        found, sev = found + leaks, max(sev, HIGH)
     ai = None
     if (JUDGE == "all" and tool not in READ_ONLY) or (JUDGE == "risky" and sev >= MEDIUM):
         ai = judge(tool, inp, found)
@@ -678,6 +1164,7 @@ CHOICES = {  # код кнопки: (решение для агента, под�
     "m": ("stop", "🛠 Разбирается человек"),
     "t": ("deny", "⏱ Нет ответа — отклонено автоматически"),
     "w": ("allow", "♾ Разрешено всегда"),
+    "c": ("deny", "🔌 Агент перестал ждать — запрос закрыт"),
 }
 REASONS = {
     "a": "TwoKey: действие одобрено человеком в Telegram.",
@@ -687,6 +1174,7 @@ REASONS = {
     "m": "TwoKey: человек взял ситуацию на себя и разбирается вручную. Остановись и жди указаний.",
     "t": "TwoKey: человек не ответил за {timeout} с — действие заблокировано. Не повторяй его без явного разрешения.",
     "w": "TwoKey: человек разрешил это действие; такое же действие в этой папке дальше будет проходить без вопроса.",
+    "c": "TwoKey: агент перестал ждать решения — запрос закрыт, действие не выполнено.",
 }
 
 
@@ -749,10 +1237,280 @@ def head_tail(s, limit=1200):
     return s[:limit * 2 // 3] + f"\n[… скрыто {len(s) - limit} символов …]\n" + s[-limit // 3:]
 
 
+# ------------------------------------------------------------------ бэкапы ---
+# Действие меняет файлы и ушло к человеку → копия затронутых файлов в папке TwoKey: агенту она недоступна (ни прочитать,
+# ни стереть). GUARDIAN_BACKUP: auto — сразу, ask — кнопкой «Сделать бэкап» в карточке, off — не делать.
+BACKUP_DIR = os.path.join(HERE, "backups")
+BACKUP_MAX_BYTES, BACKUP_MAX_FILES = 300 * 2**20, 20000  # ponytail: на одну копию; больше — помечаем «не всё»
+BACKUP_KEEP, BACKUP_KEEP_BYTES = 50, 2 * 2**30  # храним последние 50 копий и не больше 2 ГБ
+SKIP_DIRS = {"node_modules", ".git", "dist", "build", ".next", ".nuxt", "__pycache__", ".pytest_cache", ".mypy_cache",
+             ".ruff_cache", ".cache", "coverage", "target", ".turbo", ".parcel-cache", ".venv", "venv", ".tox"}
+FILE_VERBS = re.compile(  # команда что-то стирает, двигает или перезаписывает
+    r"(?<![\w.-])(rm|rmdir|rd|del|erase|unlink|shred|truncate|mv|move|cp|copy|robocopy|xcopy|dd|tee|ren|rename|"
+    r"Remove-Item|Move-Item|Copy-Item|Rename-Item|Set-Content|Add-Content|Out-File|Clear-Content)(?![\w-])"
+    r"|\bsed\s+-[a-z]*i|\bperl\s+-[a-z]*i|\s-delete\b|(?<![<>&|\d=-])>>?(?![&>=])", re.I)
+GIT_WIPE = re.compile(r"\bgit\b[^;&|\n]*?\s(reset\b[^;&|\n]*--hard|clean\b|checkout\b[^;&|\n]*\s(--|\.)(\s|$)|restore\b"
+                      r"|stash\s+(drop|clear)\b|switch\b[^;&|\n]*\s(-f|--force|--discard-changes)\b)", re.I)
+WRITE_MCP = re.compile(r"write|edit|move|rename|delete|remove|replace|patch|truncate", re.I)
+TOKEN = re.compile(r'"([^"]*)"|\'([^\']*)\'|([^\s;&|<>()"\']+)|(&&|\|\||[;&|\n()])')
+CD_WORDS, POP_WORDS = {"cd", "chdir", "pushd", "sl", "set-location", "push-location"}, {"popd", "pop-location"}
+
+
+def shell_parts(cmd, cwd):
+    """Команда по звеньям → [(слова, папка, где они выполнятся)]. Считаем cd, pushd, Set-Location; скобки — подоболочка.
+    ponytail: `bash -c "cd x"` и переменные не разбираем: для копии это лишь другая папка, для проверки git — пропуск."""
+    parts, words, stack, cur = [], [], [], cwd
+
+    def flush():
+        nonlocal words, cur
+        head = words[0].lower() if words else ""
+        if head in POP_WORDS:
+            cur = stack.pop() if stack else cur
+        elif head in CD_WORDS:
+            to = next((w for w in words[1:] if not w.startswith("-") and w.lower() != "/d"), "")
+            if to:
+                if "push" in head:
+                    stack.append(cur)
+                cur = os.path.normpath(os.path.join(cur, _plain(to)))
+        elif words:
+            parts.append((words, cur))
+        words = []
+
+    for m in TOKEN.finditer(cmd):
+        if sep := m.group(4):
+            flush()
+            if sep == "(":
+                stack.append(cur)
+            elif sep == ")" and stack:
+                cur = stack.pop()
+        else:
+            words.append(next(g for g in m.groups()[:3] if g is not None))
+    flush()
+    return parts
+
+
+def is_link(path):
+    """Ссылка или junction: внутрь не идём. Файлы OneDrive тоже reparse point, но настоящие — их копируем."""
+    try:
+        return os.path.islink(path) or getattr(os.lstat(path), "st_reparse_tag", 0) in (0xA000000C, 0xA0000003)
+    except OSError:
+        return True
+
+
+def repo_root(cwd):
+    """Корень git-репозитория: ищем .git вверх по папкам. Сам git здесь не запускаем: настройки из репозитория
+    агента (core.fsmonitor, фильтры) выполнили бы чужую программу руками TwoKey, мимо проверки."""
+    p = os.path.realpath(cwd)
+    while not os.path.exists(os.path.join(p, ".git")):
+        if os.path.dirname(p) == p:
+            return ""
+        p = os.path.dirname(p)
+    return p
+
+
+def too_wide(path):
+    """Весь диск, домашняя папка или папка выше неё: копия была бы огромной."""
+    n, home = os.path.normcase(path), os.path.normcase(os.path.realpath(os.path.expanduser("~")))
+    return os.path.dirname(path) == path or n == home or home.startswith(n.rstrip(os.sep) + os.sep)
+
+
+def backup_targets(tool, inp, cwd):
+    """Что сохранить, пока человек решает: существующие файлы и папки, которые действие меняет.
+    git reset --hard, clean и т. п. — всё рабочее дерево репозитория. → (пути, wide: цель — весь диск или дом)."""
+    if not isinstance(inp, dict):
+        return [], False
+    import glob
+    words = []  # (слово, папка, от которой оно считается)
+    if tool in WRITE_TOOLS:
+        words = [(str(inp.get("file_path") or inp.get("notebook_path") or ""), cwd)]
+    elif tool in SHELLS and isinstance(inp.get("command"), str):
+        cmd = inp["command"][:MAX_SCAN]
+        if FILE_VERBS.search(cmd):
+            words = [(w, cur) for part, cur in shell_parts(cmd, cwd) for w in part]
+        for here, sub, args in git_calls(cmd, cwd):
+            if GIT_WIPE.search(" ".join(["git", sub, *args])) and os.path.isabs(here) and (root := repo_root(here)):
+                words.append((glob.escape(root), ""))
+    elif tool.startswith("mcp__") and WRITE_MCP.search(tool):
+        words = [(s, cwd) for s in _leaves(inp) if len(s) < 500]
+    out, wide = [], False
+    for w, base in words:
+        if not w or w.startswith("-") or len(out) >= 200:
+            continue
+        p = os.path.join(base, _plain(w))
+        if not os.path.isabs(p):
+            continue
+        for hit in (glob.glob(p)[:200] if re.search(r"[*?\[]", w) else [p]):
+            try:
+                rp = os.path.realpath(hit)
+            except (OSError, ValueError):
+                continue
+            if rp in out or not (os.path.isfile(rp) or os.path.isdir(rp)) or in_home(rp):
+                continue  # NUL, /dev/null и прочие устройства — не файлы
+            if too_wide(rp):
+                wide = True
+                continue
+            out.append(rp)
+    return out, wide
+
+
+def make_backup(rid, req, targets):
+    """Копия в BACKUP_DIR/<дата>_<id>/files/… и manifest.json; ссылки и тяжёлые служебные папки пропускаем."""
+    import shutil
+    cwd = str(req.get("cwd") or "")
+    dest = os.path.join(BACKUP_DIR, f"{time.strftime('%Y-%m-%d_%H-%M-%S')}-{time.time_ns() % 10**9:09d}_{rid}")  # по имени — по времени
+    st = {"files": 0, "bytes": 0, "skipped": 0, "truncated": False}
+    real_cwd = os.path.realpath(cwd) if cwd else ""  # от настоящего пути: иначе USER~1 дал бы ..\.. наружу из папки копии
+    base = os.path.normcase(real_cwd)
+
+    def rel(src):  # внутри папки агента — тот же путь; снаружи — _outside/<диск>/<путь>
+        n = os.path.normcase(src)
+        if base and (n == base or n.startswith(base.rstrip(os.sep) + os.sep)):
+            return os.path.relpath(src, real_cwd)
+        drive, tail = os.path.splitdrive(src)
+        return os.path.join("_outside", drive.strip(":\\/") or "root", tail.lstrip("\\/"))
+
+    def full():
+        return st["files"] >= BACKUP_MAX_FILES or st["bytes"] >= BACKUP_MAX_BYTES
+
+    def put(src, name):
+        try:
+            info = os.lstat(src)
+            if not stat.S_ISREG(info.st_mode):
+                return  # устройство, канал, ссылка: содержимого для копии нет, а /dev/zero читался бы вечно
+            if full() or st["bytes"] + info.st_size > BACKUP_MAX_BYTES:
+                st["truncated"] = True  # этот файл не вошёл; другие, поменьше, ещё могут
+                return
+            out = os.path.normpath(os.path.join(dest, "files", name))
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            shutil.copy2(src, out, follow_symlinks=False)
+            st["files"], st["bytes"] = st["files"] + 1, st["bytes"] + info.st_size
+        except OSError:
+            st["skipped"] += 1  # занят, нет прав, исчез — остальное всё равно сохраняем
+
+    for t in targets:
+        if full():
+            st["truncated"] = True
+            break
+        if os.path.isdir(t) and not is_link(t):
+            for root, dirs, files in os.walk(t):
+                dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not is_link(os.path.join(root, d))
+                           and os.path.normcase(os.path.join(root, d)) != HOME_DIR]  # в папку TwoKey (токен бота) не заходим
+                for name in files:
+                    src = os.path.join(root, name)
+                    put(src, os.path.join(rel(t), os.path.relpath(src, t)))
+                if full():
+                    st["truncated"] = True
+                    break
+        elif os.path.isfile(t):
+            put(t, rel(t))
+    if not st["files"]:  # нечего хранить (только служебные папки или всё занято)
+        shutil.rmtree(dest, ignore_errors=True)
+        return {"path": "", **st}
+    os.makedirs(dest, exist_ok=True)
+    man = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "agent": req.get("agent"), "tool": req.get("tool"), "cwd": cwd,
+           "action": head_tail(shown(req.get("input") or {}), 300), "targets": targets[:50], **st}
+    # backslashreplace: у имени файла бывают «суррогаты» — в JSON они станут \udcXX, и список копий их прочитает
+    with open(os.path.join(dest, "manifest.json"), "w", encoding="utf-8", errors="backslashreplace") as f:
+        json.dump(man, f, ensure_ascii=False, indent=1)
+    prune_backups()
+    return {"path": dest, **st}
+
+
+def list_backups():
+    """Бэкапы, новые сверху: имя папки + manifest.json."""
+    try:
+        names = sorted(os.listdir(BACKUP_DIR), reverse=True)
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        try:
+            with open(os.path.join(BACKUP_DIR, n, "manifest.json"), encoding="utf-8") as f:
+                out.append({**json.load(f), "name": n})
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+def prune_backups():
+    import shutil
+    total, items = 0, list_backups()
+    for i, b in enumerate(items):
+        total += b.get("bytes") or 0
+        if i >= BACKUP_KEEP or total > BACKUP_KEEP_BYTES:
+            shutil.rmtree(os.path.join(BACKUP_DIR, b["name"]), ignore_errors=True)
+    known = {b["name"] for b in items}
+    for n in os.listdir(BACKUP_DIR):  # копия оборвалась (выключили компьютер): её нет в списке, а место она занимала бы вечно
+        path = os.path.join(BACKUP_DIR, n)
+        try:
+            if n not in known and re.match(r"\d{4}-\d\d-\d\d_", n) and time.time() - os.path.getmtime(path) > 86400:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def backup_lines(b):
+    """Строка о бэкапе: для Telegram (HTML) и для окна (текст)."""
+    tail = "" if not b["truncated"] else " · " + tr("не всё: сработал лимит")
+    if b["skipped"]:
+        tail += " · " + tr("пропущено: {n}").format(n=b["skipped"])
+    if not b["path"]:
+        line = "💾 " + tr("Бэкап: копировать нечего") + tail
+        return esc(line, 300), line
+    fmt = tr("Бэкап: {path} — файлов: {files}, {mb} МБ")
+    nums = {"files": b["files"], "mb": f"{max(b['bytes'] / 2**20, 0.1):.1f}"}  # 0.0 МБ при нескольких файлах сбивало бы с толку
+    return ("💾 " + fmt.format(path=f"<code>{esc(b['path'])}</code>", **nums) + esc(tail, 200),
+            "💾 " + fmt.format(path=b["path"], **nums) + tail)
+
+
+def card_text(p):
+    return p["text"] + (f"\n\n{p['backup_line']}" if p.get("backup_line") else "")
+
+
+def refresh_card(p):
+    """Карточка в Telegram после бэкапа: пока решения нет — с кнопками (без «Сделать бэкап»), после — с итогом."""
+    if not p.get("msg_id"):
+        return
+    with p["tg_lock"]:  # правки карточки по очереди: иначе поздняя правка вернула бы кнопки на закрытый запрос
+        if p["decision"]:
+            tg_safe("editMessageText", chat_id=TG_CHAT_ID, message_id=p["msg_id"], text=card_text(p) + p.get("closing", ""),
+                    parse_mode="HTML")
+        else:
+            rows = [r for r in p["rows"] if not any(b["callback_data"].startswith("b:") for b in r)]
+            tg_safe("editMessageText", chat_id=TG_CHAT_ID, message_id=p["msg_id"], text=card_text(p), parse_mode="HTML",
+                    reply_markup={"inline_keyboard": rows})
+
+
+def start_backup(rid):
+    """Снять копию в фоне (решение остаётся за человеком); когда готово — обновить карточку в Telegram и в окне."""
+    with LOCK:
+        p = PENDING.get(rid)
+        if not p or p["decision"] or p.get("backup_job") or not p.get("can_backup"):
+            return False
+        p["backup_job"] = job = threading.Event()
+        p["backup_line"] = p["card"]["backup"] = "💾 " + tr("Делаю бэкап файлов…")
+        p["card"]["can_backup"] = False
+
+    def work():
+        try:
+            b = make_backup(rid, p["req"], p["targets"])
+            html_line, plain = backup_lines(b)
+            audit({"agent": p["req"].get("agent"), "tool": p["req"].get("tool"), "input": p["req"].get("input")},
+                  {"decision": "backup", "by": "twokey", "reason": plain})
+        except Exception as e:
+            html_line = plain = "💾 " + tr("Бэкап не получился: {e}").format(e=esc(e, 200))
+        with LOCK:
+            p["backup_line"], p["card"]["backup"] = html_line, plain
+        job.set()
+        refresh_card(p)
+    threading.Thread(target=work, daemon=True).start()
+    return True
+
+
 def render(req, sev, found, ai):
     tool, inp = req.get("tool", "?"), req.get("input") or {}
-    lines = [f"{ICON[sev]} <b>TwoKey · {tr('риск')}: {tr(RU[sev])}</b>",
-             f"{tr('Агент')}: {esc(req.get('agent', '?'))} · {tr('инструмент')}: <code>{esc(tool)}</code>"]
+    who = f"{tr('Агент')}: {esc(req['agent'])} · {tr('инструмент')}" if req.get("agent") else tr("инструмент").capitalize()
+    lines = [f"{ICON[sev]} <b>TwoKey · {tr('риск')}: {tr(RU[sev])}</b>", f"{who}: <code>{esc(tool)}</code>"]
     if req.get("cwd"):
         lines.append(f"{tr('Папка')}: <code>{esc(req['cwd'])}</code>")
     lines += ["", f"<b>{tr('Что агент хочет сделать:')}</b>", f"<pre>{html.escape(head_tail(shown(inp)))}</pre>"]
@@ -762,7 +1520,8 @@ def render(req, sev, found, ai):
     fixes = [tr(f["fix"]) for f in found] + list((ai or {}).get("alternatives", []))
     lines += ["", f"<b>{tr('Почему опасно:')}</b>"] + [f"• {esc(r, 200)}" for r in list(dict.fromkeys(risks))[:5]]
     lines += ["", f"<b>{tr('Как безопаснее:')}</b>"] + [f"• {esc(x, 200)}" for x in list(dict.fromkeys(fixes))[:5]]
-    lines += ["", "⏱ " + tr("Нет ответа {m} мин → автоматический отказ.").format(m=max(TIMEOUT // 60, 1))]
+    lines += ["", "⏳ " + tr("Жду вашего ответа без ограничения по времени. Пока вы не решите, действие не выполнится.")
+              if TIMEOUT == NO_LIMIT else "⏱ " + tr("Нет ответа {m} мин → автоматический отказ.").format(m=max(TIMEOUT // 60, 1))]
     return "\n".join(lines)
 
 
@@ -785,33 +1544,50 @@ def resolve(rid, choice, who="", text=""):
         note += f"\n<i>{esc(text, 500)}</i>"
     if choice == "w":
         note += "\n" + tr("Отменить: /forget {id} · весь список: /always").format(id=p["allow"][0])
+    p["closing"] = note
     p["event"].set()  # агент получает решение сразу, медленный Telegram его не задерживает
     if p.get("msg_id"):
-        tg_safe("editMessageText", chat_id=TG_CHAT_ID, message_id=p["msg_id"], text=p["text"] + note, parse_mode="HTML")
+        with p["tg_lock"]:
+            tg_safe("editMessageText", chat_id=TG_CHAT_ID, message_id=p["msg_id"], text=card_text(p) + note, parse_mode="HTML")
     return True
 
 
-def ask_human(req, sev, found, ai, deadline):
+def ask_human(req, sev, found, ai, deadline, gone=None):
     rid = secrets.token_hex(4)
+    targets, wide = backup_targets(str(req.get("tool", "")), req.get("input") or {}, str(req.get("cwd") or ""))
+    can_backup = BACKUP != "off" and bool(targets)
     p = {"event": threading.Event(), "decision": None, "text": render(req, sev, found, ai),
-         "excerpt": head_tail(shown(req.get("input") or {}), 80), "deadline": deadline,
-         "card": {"tool": str(req.get("tool", "?")), "agent": str(req.get("agent", "?")), "cwd": str(req.get("cwd") or ""),
+         "excerpt": head_tail(shown(req.get("input") or {}), 80), "deadline": deadline, "tg_lock": threading.Lock(),
+         "req": req, "targets": targets, "can_backup": can_backup,
+         "card": {"tool": str(req.get("tool", "?")), "agent": str(req.get("agent") or ""), "cwd": str(req.get("cwd") or ""),
                   "action": head_tail(shown(req.get("input") or {})), "severity": LEVELS[sev], "ru": tr(RU[sev]),
                   "findings": [tr(f["why"]) + (f" — {f['hit']}" if f.get("hit") else "") for f in found],
                   "fixes": list(dict.fromkeys([tr(f["fix"]) for f in found] + list((ai or {}).get("alternatives", []))))[:5],
-                  "ai": (ai or {}).get("summary") or "", "can_always": sev == HIGH}}
+                  "ai": (ai or {}).get("summary") or "", "can_always": sev == HIGH, "no_limit": TIMEOUT == NO_LIMIT,
+                  "backup": "", "can_backup": BACKUP == "ask" and can_backup}}
+    if wide and not can_backup and BACKUP != "off":
+        p["backup_line"] = p["card"]["backup"] = "💾 " + tr(
+            "Бэкап не делаю: цель — весь диск или домашняя папка, копия была бы огромной")
     rows = [[btn("✅ " + tr("Пропустить"), "a", rid), btn("❌ " + tr("Отклонить"), "d", rid)],
             [btn("✍️ " + tr("Своё решение"), "s", rid), btn("🛠 " + tr("Разберусь вручную"), "m", rid)]]
     if sev == HIGH:  # критичное навсегда не разрешаем — только по одному разу
         p["allow"] = (allow_key(req), {"tool": str(req.get("tool", "")), "cwd": str(req.get("cwd") or ""),
                                        "action": head_tail(shown(req.get("input") or {}), 200)})
         rows.append([btn("♾ " + tr("Разрешать всегда"), "w", rid)])
+    if BACKUP == "ask" and can_backup:
+        rows.append([btn("💾 " + tr("Сделать бэкап"), "b", rid)])
+    p["rows"] = rows
     with LOCK:
         PENDING[rid] = p
+    if BACKUP == "auto" and can_backup:
+        start_backup(rid)  # копия снимается, пока человек читает карточку
     if TG_TOKEN and TG_CHAT_ID:  # без Telegram решение ждём только в панели (decide() проверил, что она открыта)
         try:
-            msg = tg("sendMessage", chat_id=TG_CHAT_ID, text=p["text"], parse_mode="HTML", reply_markup={"inline_keyboard": rows})
+            sent = card_text(p)
+            msg = tg("sendMessage", chat_id=TG_CHAT_ID, text=sent, parse_mode="HTML", reply_markup={"inline_keyboard": rows})
             p["msg_id"] = msg["message_id"]
+            if card_text(p) != sent:
+                refresh_card(p)  # бэкап закончился, пока карточка летела в Telegram
         except Exception as e:
             if not panel_live():
                 with LOCK:
@@ -819,14 +1595,19 @@ def ask_human(req, sev, found, ai, deadline):
                 return {"decision": "deny", "by": "error", "reason": tr(
                     "TwoKey: не удалось связаться с Telegram ({e}). Действие заблокировано (fail-closed).").format(e=e)}
             log(f"Telegram недоступен ({e}) — ждём решения в панели")
-    if not p["event"].wait(max(0.0, deadline - time.monotonic())):  # отсчёт от прихода запроса, а не после судьи
-        resolve(rid, "t")
+    while not p["event"].wait(min(1.0, max(0.0, deadline - time.monotonic()))):  # отсчёт от прихода запроса, а не после судьи
+        if time.monotonic() >= deadline:
+            resolve(rid, "t")
+        elif gone and gone():  # агента прервали: иначе карточка без срока висела бы вечно, а кнопки уже ни на что не влияли
+            resolve(rid, "c")
+    if p["decision"] in ("a", "w") and p.get("backup_job"):
+        p["backup_job"].wait(50)  # пропускаем, когда копия снята (не дольше 50 с: хук ждёт до TIMEOUT + 60)
     with LOCK:
         PENDING.pop(rid, None)
         for key in [k for k, (r, _) in AWAIT_TEXT.items() if r == rid]:
             del AWAIT_TEXT[key]
     choice = p["decision"]
-    return {"decision": CHOICES[choice][0], "by": "timeout" if choice == "t" else "human", "choice": tr(CHOICES[choice][1]),
+    return {"decision": CHOICES[choice][0], "by": {"t": "timeout", "c": "gone"}.get(choice, "human"), "choice": tr(CHOICES[choice][1]),
             "reason": tr(REASONS[choice]).format(text=p.get("note", ""), timeout=TIMEOUT)}
 
 
@@ -838,7 +1619,8 @@ def authorized(chat, user):
 BOT_COMMANDS = [("start", "Начать: покажу chat_id этого чата"), ("help", "Как работают кнопки и команды"),
                 ("status", "Состояние защиты"), ("templates", "Готовые шаблоны: включить или выключить"),
                 ("lang", "Язык: русский, English, қазақша"), ("panel", "Ссылка на окно TwoKey"),
-                ("always", "Что разрешено навсегда"), ("forget", "Отменить «всегда»: /forget <id>")]
+                ("always", "Что разрешено навсегда"), ("forget", "Отменить «всегда»: /forget <id>"),
+                ("backups", "Последние бэкапы файлов")]
 BOT_ABOUT = ("TwoKey — второй ключ для ИИ-агентов.\n\nКогда агент собирается сделать что-то опасное — удалить базу, "
              "сделать force push, выложить ключ в открытый доступ — бот присылает карточку: что хочет агент, почему это "
              "опасно и как безопаснее.\n\nРешение одной кнопкой: Пропустить, Отклонить, Своё решение, Разберусь вручную "
@@ -849,9 +1631,10 @@ HELP = ("TwoKey — второй ключ для ИИ-агентов. Опасн
         "❌ Отклонить — агент получит отказ и предложит безопасный путь\n"
         "✍️ Своё решение — ответьте текстом, и агент сделает по-вашему\n"
         "🛠 Разберусь вручную — агент остановится и будет ждать\n"
-        "♾ Разрешать всегда — для уровня «высокий»: такое же действие в той же папке больше не спросит\n\n"
+        "♾ Разрешать всегда — для уровня «высокий»: такое же действие в той же папке больше не спросит\n"
+        "💾 Сделать бэкап — копия файлов, которые агент хочет изменить или удалить (в настройках можно делать её сразу)\n\n"
         "Команды:\n/status — состояние защиты\n/templates — готовые шаблоны\n/lang — язык\n/panel — окно TwoKey\n"
-        "/always — что разрешено навсегда\n/forget <id> — отменить «всегда»")
+        "/always — что разрешено навсегда\n/forget <id> — отменить «всегда»\n/backups — последние бэкапы файлов")
 LANG_LABELS = {"ru": "Русский", "en": "English", "kk": "Қазақша"}
 
 
@@ -877,7 +1660,8 @@ def status_text():
         tr("Своих шаблонов: {n}").format(n=len(CONFIG["custom"]) - tpl),
         tr("Разрешено навсегда: {n}").format(n=allow),
         tr("AI-судья: {j}").format(j=judge + (f" · {PROVIDER}" if JUDGE != "off" else "")),
-        tr("Ждём ответа человека: {s} с").format(s=TIMEOUT)])
+        tr("Ждём ответа человека: без ограничений") if TIMEOUT == NO_LIMIT else tr("Ждём ответа человека: {s} с").format(s=TIMEOUT),
+        tr("Бэкап файлов: {m}").format(m={"auto": tr("сразу"), "ask": tr("по кнопке"), "off": tr("выключен")}[BACKUP])])
 
 
 def templates_keyboard():
@@ -924,6 +1708,11 @@ def handle_update(u):
                 tg_safe("sendMessage", chat_id=chat, text=tr("Язык переключён: {lang}").format(lang=LANG_LABELS[rid]))
                 threading.Thread(target=bot_setup, daemon=True).start()
             return
+        if choice == "b":  # бэкап по кнопке — решение остаётся за человеком
+            ok = start_backup(rid)
+            tg_safe("answerCallbackQuery", callback_query_id=cq["id"],
+                    text=tr("Делаю бэкап…") if ok else tr("Бэкап уже сделан или запрос закрыт"))
+            return
         if choice == "s":  # текст примем только ответом на этот запрос и только от нажавшего
             tg_safe("answerCallbackQuery", callback_query_id=cq["id"])
             with LOCK:
@@ -968,6 +1757,12 @@ def handle_update(u):
         elif cmd == "/panel":
             reply = (tr("Одноразовая ссылка на окно TwoKey — откройте на компьютере, где запущен TwoKey:") + f"\n{panel_link()}"
                      if UI_TOKEN else tr("Окно TwoKey работает, только когда запущен сервер."))
+        elif cmd == "/backups":
+            items = list_backups()[:8]
+            reply = ("💾 " + tr("Последние бэкапы (папка {dir}):").format(dir=BACKUP_DIR) + "\n\n" + "\n".join(
+                f"{b.get('time', '')[5:16]} · " + tr("файлов: {n}, {mb} МБ").format(n=b.get("files", 0),
+                                                                                    mb=f"{(b.get('bytes') or 0) / 2**20:.1f}")
+                + f"\n{b['name']}\n{str(b.get('action', ''))[:100]}\n" for b in items))[:4000] if items else tr("Бэкапов пока нет.")
         elif cmd == "/always":
             with LOCK:
                 lines = [f"{k} · {v['tool']} · {v['action']}" + (f" · {v['cwd']}" if v.get("cwd") else "")
@@ -1007,12 +1802,12 @@ def poll_forever():
 
 
 # ----------------------------------------------------------------- сервер ---
-def decide(req):
+def decide(req, gone=None):
     deadline = time.monotonic() + TIMEOUT
     tool, inp, cwd = str(req.get("tool", "?")), req.get("input") or {}, str(req.get("cwd") or "")
     with LOCK:
         always = ALLOW.get(allow_key(req))
-    if always and evaluate(tool, inp, cwd)[0] < CRITICAL:  # если правила стали строже — снова спросим
+    if always and evaluate(tool, inp, cwd)[0] < CRITICAL and not command_leaks(tool, inp, cwd):  # правила строже или в git секрет — спросим
         res = {"decision": "allow", "by": "allowlist", "reason": "", "severity": "HIGH", "findings": [], "ai": None,
                "choice": f"♾ Разрешено всегда ({always.get('who', '')}, {always.get('ts', '')})"}
         audit(req, res)
@@ -1024,7 +1819,7 @@ def decide(req):
         res = {"decision": "ask", "by": "rules",
                "reason": tr("TwoKey: опасное действие — {why}. Подтвердите вручную.").format(why="; ".join(tr(f["why"]) for f in found))}
     else:
-        res = ask_human(req, sev, found, ai, deadline)
+        res = ask_human(req, sev, found, ai, deadline, gone)
     res.update(severity=LEVELS[sev], findings=[f["why"] for f in found], ai=(ai or {}).get("summary"))
     if sev >= MEDIUM:
         audit(req, res)
@@ -1035,7 +1830,7 @@ def audit(req, res):
     inp = req.get("input") or {}
     rec = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "agent": req.get("agent"), "tool": req.get("tool"),
            "action": head_tail(shown(inp), 500), **res}
-    with LOCK, open(AUDIT, "a", encoding="utf-8") as f:
+    with LOCK, open(AUDIT, "a", encoding="utf-8", errors="backslashreplace") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
@@ -1084,13 +1879,14 @@ SETTINGS = {
     "TG_TOKEN": lambda v: not v or re.fullmatch(r"\d{6,12}:[\w-]{30,}", v),
     "TG_CHAT_ID": lambda v: not v or re.fullmatch(r"-?\d{1,20}", v),
     "TG_ADMINS": lambda v: re.fullmatch(r"[\d,\s]*", v),
-    "GUARDIAN_TIMEOUT": lambda v: v.isdigit() and 30 <= int(v) <= 900,
+    "GUARDIAN_TIMEOUT": lambda v: v == "0" or (v.isdigit() and 30 <= int(v) <= 900),  # 0 — без ограничений
     "GUARDIAN_JUDGE": lambda v: v in ("off", "risky", "all"),
     "GUARDIAN_JUDGE_PROVIDER": lambda v: v in ("claude", "openai", "command"),
     "GUARDIAN_MODEL": lambda v: len(v) <= 100,
     "GUARDIAN_JUDGE_URL": lambda v: not v or re.fullmatch(r"https?://\S+", v),
     "GUARDIAN_JUDGE_KEY": lambda v: len(v) <= 400,
     "GUARDIAN_JUDGE_CMD": lambda v: len(v) <= 500,
+    "GUARDIAN_BACKUP": lambda v: v in ("auto", "ask", "off"),
 }
 SECRET_SETTINGS = {"TG_TOKEN", "GUARDIAN_JUDGE_KEY"}
 LAST_START = {}  # кто последним написал боту /start — подсказка для chat_id в настройках
@@ -1127,7 +1923,7 @@ def _masked(v):
 
 
 def hook_status():
-    """Подключён ли хук TwoKey в настройках Claude Code (только чтение; та же папка, что у установщика)."""
+    """Подключён ли хук TwoKey в настройках агента (только чтение; та же папка, что у установщика)."""
     path = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude"), "settings.json")
     try:
         with open(path, encoding="utf-8-sig") as f:
@@ -1141,7 +1937,8 @@ def hook_status():
             spec = " ".join([str(h.get("command", ""))] + [str(a) for a in h.get("args") or []])
             if re.search(r"(hook|guardian)\.py", spec):
                 return {"installed": True, "ours": HOME_DIR in os.path.normcase(spec.replace("/", os.sep)),
-                        "on_failure": h.get("onFailure", ""), "timeout": h.get("timeout"), "matcher": g.get("matcher")}
+                        "on_failure": h.get("onFailure", ""), "timeout": h.get("timeout"), "matcher": g.get("matcher"),
+                        "long_wait": isinstance(h.get("timeout"), (int, float)) and h["timeout"] > NO_LIMIT}
     return {"installed": False}
 
 
@@ -1149,7 +1946,7 @@ _VERSIONS = {}
 
 
 def claude_versions():
-    """Версии Claude Code: приложения Claude (своя копия) и CLI. onFailure работает с 2.1.295."""
+    """Версии агента: приложения (своя копия) и CLI. onFailure работает с 2.1.295."""
     if not _VERSIONS:
         import glob, shutil, subprocess
         found = [os.path.basename(p) for p in glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", "~"), "Claude-Data", "*", "claude-code", "*"))]
@@ -1183,8 +1980,10 @@ def make_shortcut(lnk, target, args, desc, workdir=HERE):
     """Ярлык Windows (.lnk) через WScript.Shell; значения идут через переменные среды — без проблем с кавычками."""
     import subprocess
     ps = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:TK_LNK); $s.TargetPath = $env:TK_TARGET; "
-          "$s.Arguments = $env:TK_ARGS; $s.WorkingDirectory = $env:TK_DIR; $s.Description = $env:TK_DESC; $s.Save()")
-    env = dict(os.environ, TK_LNK=lnk, TK_TARGET=target, TK_ARGS=args, TK_DIR=workdir, TK_DESC=desc)
+          "$s.Arguments = $env:TK_ARGS; $s.WorkingDirectory = $env:TK_DIR; $s.Description = $env:TK_DESC; "
+          "if (Test-Path -LiteralPath $env:TK_ICON) { $s.IconLocation = $env:TK_ICON }; $s.Save()")
+    env = dict(os.environ, TK_LNK=lnk, TK_TARGET=target, TK_ARGS=args, TK_DIR=workdir, TK_DESC=desc,
+               TK_ICON=os.path.join(HERE, "icon.ico"))
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], env=env, check=True, capture_output=True, timeout=60)
 
 
@@ -1201,8 +2000,8 @@ def set_autostart(on):
 def settings_view():
     e = os.environ.get
     values = {k: _masked(e(k, "")) if k in SECRET_SETTINGS else e(k, "") for k in SETTINGS}
-    values.update(GUARDIAN_LANG=LANG, GUARDIAN_TIMEOUT=str(TIMEOUT), GUARDIAN_JUDGE=JUDGE, GUARDIAN_JUDGE_PROVIDER=PROVIDER,
-                  GUARDIAN_MODEL=MODEL)
+    values.update(GUARDIAN_LANG=LANG, GUARDIAN_TIMEOUT="0" if TIMEOUT == NO_LIMIT else str(TIMEOUT), GUARDIAN_JUDGE=JUDGE, GUARDIAN_JUDGE_PROVIDER=PROVIDER,
+                  GUARDIAN_MODEL=MODEL, GUARDIAN_BACKUP=BACKUP)
     try:
         import importlib.util
         sdk = importlib.util.find_spec("anthropic") is not None
@@ -1264,7 +2063,7 @@ def api_shutdown(b):
 def audit_event(text):
     rec = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "agent": "панель", "tool": "настройки", "action": text,
            "decision": "config", "by": "human"}
-    with LOCK, open(AUDIT, "a", encoding="utf-8") as f:
+    with LOCK, open(AUDIT, "a", encoding="utf-8", errors="backslashreplace") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
@@ -1383,6 +2182,10 @@ def api_forget(b):
 
 def api_decide(b):
     rid, choice, text = str(b.get("rid", "")), str(b.get("choice", "")), str(b.get("text", "")).strip()
+    if choice == "b":  # «Сделать бэкап» из окна: решение остаётся за человеком
+        if not start_backup(rid):
+            raise ValueError("Бэкап уже сделан или запрос закрыт")
+        return {"ok": True}
     if choice not in ("a", "d", "s", "m", "w") or (choice == "s" and not text):
         raise ValueError("Неверное решение")
     if not resolve(rid, choice, who="панель", text=text[:1000] if choice == "s" else ""):
@@ -1407,6 +2210,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"error": "панель открывается только с этого компьютера"})
         if path == "/":
             return self.page()
+        if path == "/icon.png":
+            return self.icon()
         if path in ("/api/state", "/api/settings"):
             if not self.token_ok():
                 return self.reply(401, {"error": "нужен токен из окна сервера"})
@@ -1422,11 +2227,15 @@ class Handler(BaseHTTPRequestHandler):
             if req is None:
                 return self.reply(400, {"error": "ожидается JSON-объект {tool, input}"})
             try:
-                res = decide(req)
+                res = decide(req, self.client_gone)
             except Exception as e:
                 res = {"decision": "deny", "by": "error", "reason": f"TwoKey: внутренняя ошибка ({e}). Заблокировано (fail-closed)."}
             res["home"] = HOME_DIR  # хук поверит только серверу из своей же папки
-            return self.reply(200, res)
+            try:
+                return self.reply(200, res)
+            except OSError:
+                return  # хук уже закрыл соединение: отвечать некому
+
         if path == "/api/login":  # билет из ссылки → токен сессии; билет сгорает
             if not self.local_origin():
                 return self.reply(403, {"error": "панель открывается только с этого компьютера"})
@@ -1451,6 +2260,13 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, API[path](b))
         except ValueError as e:
             self.reply(400, {"error": str(e)})
+
+    def client_gone(self):
+        """Хук закрыл соединение: агента прервали или среда агента сняла хук по таймауту."""
+        try:
+            return bool(select.select([self.connection], [], [], 0)[0]) and not self.connection.recv(1, socket.MSG_PEEK)
+        except (OSError, ValueError):
+            return True
 
     def body(self):
         try:
@@ -1488,6 +2304,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def icon(self):
+        try:
+            with open(os.path.join(HERE, "icon.png"), "rb") as f:
+                body = f.read()
+        except OSError:
+            return self.reply(404, {"error": "not found"})
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "max-age=86400")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1534,7 +2364,8 @@ def serve(no_browser=False):
     SERVER = srv
     refresh_ticket_file()
     url = panel_link()
-    log(f"TwoKey слушает http://{HOST}:{PORT} · AI-судья: {JUDGE} · ожидание решения: {TIMEOUT} с")
+    log(f"TwoKey слушает http://{HOST}:{PORT} · AI-судья: {JUDGE} · ожидание решения: "
+        + ("без ограничений" if TIMEOUT == NO_LIMIT else f"{TIMEOUT} с"))
     log(f"Панель управления (ссылка одноразовая; новая — /panel в боте или перезапуск): {url}")
     if not no_browser:
         try:
@@ -1564,8 +2395,8 @@ def post(url, obj, timeout):
 
 
 def hook_output(res):
-    """Решение сервера → JSON для PreToolUse-хука Claude Code (None = молча пропустить).
-    «allow» хук не выдаёт никогда: одобренное действие идёт через обычные разрешения Claude Code,
+    """Решение сервера → JSON для PreToolUse-хука (None = молча пропустить).
+    «allow» хук не выдаёт никогда: одобренное действие идёт через обычные разрешения агента,
     так что даже поддельный ответ сервера не обойдёт их."""
     d = res.get("decision")
     if d == "allow":
@@ -1579,7 +2410,7 @@ def hook_output(res):
 
 
 def hook():
-    """Любая ошибка хука = блок. Claude Code при сбое хука (кроме exit 2) действие ВЫПОЛНЯЕТ."""
+    """Любая ошибка хука = блок. Агент при сбое хука (кроме exit 2) действие ВЫПОЛНЯЕТ."""
     try:
         _hook()
     except Exception as e:
@@ -1595,9 +2426,10 @@ def _hook():
     # не выключит защиту молча.
     apply_config({"disabled": [], "custom": CONFIG["custom"]})
     sev, found = evaluate(tool, inp, cwd)
-    if sev < MEDIUM and JUDGE != "all":
+    git_send = tool in SHELLS and isinstance(inp, dict) and GIT_SEND.search(str(inp.get("command") or "")[:MAX_SCAN])  # проверит сервер
+    if sev < MEDIUM and JUDGE != "all" and not git_send:
         return  # быстрый путь: безопасное действие, ноль задержки
-    req = {"tool": tool, "input": inp, "agent": "claude-code", "cwd": cwd, "session": ev.get("session_id", "")}
+    req = {"tool": tool, "input": inp, "cwd": cwd, "session": ev.get("session_id", "")}
     try:
         res = post(URL, req, timeout=TIMEOUT + 30)
         if res.get("home") != HOME_DIR:  # на порту другая копия TwoKey (например, из репозитория) — ей не верим
@@ -1684,7 +2516,7 @@ def log(msg):
 # ------------------------------------------------------------ самопроверка ---
 def selftest():
     global tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT, ALLOW_FILE, RULES_FILE, UI_TOKEN, LAST_PANEL_POLL, URL, ENV_PATH, \
-        PROVIDER, JUDGE_URL, JUDGE_CMD, MODEL, LANG, TICKET_FILE
+        PROVIDER, JUDGE_URL, JUDGE_CMD, MODEL, LANG, TICKET_FILE, BACKUP, BACKUP_DIR, BACKUP_MAX_BYTES
     import contextlib, io, tempfile
     tmp = tempfile.mkdtemp()
     saved_cfg, saved_rules_file = CONFIG, RULES_FILE
@@ -1694,7 +2526,7 @@ def selftest():
     P = lambda c: evaluate("PowerShell", {"command": c})[0]
 
     def run_hook(url, cmd):
-        """_hook() как его зовёт Claude Code: событие в stdin, ответ из stdout; сервер — по адресу url."""
+        """_hook() как его зовёт агент: событие в stdin, ответ из stdout; сервер — по адресу url."""
         global URL
         saved = URL, sys.stdin
         URL, out = url, io.StringIO()
@@ -1768,7 +2600,7 @@ def selftest():
     ]
     if os.name == "nt":  # \\?\C:\… — тот же файл
         cases.append((evaluate("Write", {"file_path": "\\\\?\\" + os.path.join(HERE, "rules.json"), "content": "{}"})[0], CRITICAL))
-        # Claude Code сам раскрывает ~ и /c/… в путях файловых инструментов — и мы тоже; «папка.\» — та же папка
+        # Агент сам раскрывает ~ и /c/… в путях файловых инструментов — и мы тоже; «папка.\» — та же папка
         cases += [(evaluate("Read", {"file_path": "/" + HERE[0].lower() + HERE[2:].replace(os.sep, "/") + "/.env"})[0], CRITICAL),
                   (P(f"Get-Content {HERE}.\\.env"), CRITICAL),
                   (evaluate("Write", {"file_path": "C:\\Users\\me\\.claude.\\settings.json", "content": "{}"})[0], CRITICAL)]
@@ -1783,7 +2615,7 @@ def selftest():
                   (evaluate("Write", {"file_path": "/p/deploy.py", "content": f"RT = os.path.expanduser('~/{HOME_NAME}')"})[0], CRITICAL)]
     claude_dir = os.path.join(os.path.expanduser("~"), ".claude")
     cases += [
-        # работа прямо в папке настроек Claude Code
+        # работа прямо в папке настроек агента
         (evaluate("Write", {"file_path": "settings.json", "content": "{}"}, claude_dir)[0], CRITICAL),
         (evaluate("Bash", {"command": "sed -i 's/PreToolUse/x/' settings.json"}, claude_dir)[0], CRITICAL),
         # вложенный Claude без пользовательских настроек (и наших хуков)
@@ -1872,6 +2704,23 @@ def selftest():
             pass
     apply_config({"disabled": [], "custom": []})
 
+    # громкие случаи с ИИ: регрессионный набор (в рабочей копии его нет) и границы правил для файлов
+    incidents = os.path.join(HERE, "tests", "incidents.jsonl")
+    if os.path.exists(incidents):
+        for line in open(incidents, encoding="utf-8"):
+            r = json.loads(line)
+            assert (evaluate(r["tool"], r["input"])[0] >= HIGH) == (r["expect"] == "block"), r
+    W = lambda path, body: evaluate("Write", {"file_path": path, "content": body})[0]
+    assert W("firestore.rules", "allow read, write: if true;") >= HIGH and W("docs/firebase.md", "allow read, write: if true;") < HIGH
+    assert W("src/app.js", "// we allow this;") < HIGH and W(".mcp.json", "{}") >= HIGH and W("docs/.mcp.json.md", "{}") < HIGH
+    assert W("migrations/1.sql", "ALTER TABLE users DISABLE ROW LEVEL SECURITY;") >= HIGH
+    assert evaluate("Bash", {"command": "ls", "dangerouslyDisableSandbox": True})[0] >= HIGH
+    assert evaluate("Bash", {"command": 'psql -c "select * from design_tokens"'})[0] < HIGH
+    assert evaluate("Bash", {"command": 'psql -c "select * from integration_tokens"'})[0] >= HIGH
+    assert evaluate("mcp__supabase__execute_sql", {"query": "select * from integration_tokens"})[0] >= HIGH
+    assert W("src/a.py", "u = 'https://a.blob.core.windows.net/c?sv=2023-01-03&sp=r&" + "sig=" + "aB3" * 12 + "'") >= HIGH
+    assert W("src/a.py", "SERVICE_ROLE_KEY=" + "eyJ" + "a" * 20 + ".eyJ" + "b" * 20 + "." + "c" * 20) >= HIGH
+
     # человек в контуре: поддельный Telegram
     sent, real = [], (tg, TG_TOKEN, TG_CHAT_ID, TIMEOUT, JUDGE, AUDIT, ALLOW_FILE, dict(ALLOW))
     tg = lambda method, **p: sent.append((method, p)) or {"message_id": 1}
@@ -1919,6 +2768,261 @@ def selftest():
         handle_update(say(f"/forget {next(iter(ALLOW))}", reply=None))
         assert not ALLOW and "Убрано" in sent[-1][1]["text"]
         assert run("npm publish", cb("d:RID"))["decision"] == "deny"  # после /forget снова спрашивает
+
+        # бэкап при алерте: auto — копия сразу, ask — кнопкой «Сделать бэкап», off — нет; «пропустить» ждёт копию
+        BACKUP_DIR, proj = os.path.join(tmp, "backups"), os.path.join(tmp, "proj")
+        for name, body in (("src/app.py", "print(1)"), ("src/node_modules/x.js", "x"), (".env", "KEY=1")):
+            os.makedirs(os.path.dirname(os.path.join(proj, name)), exist_ok=True)
+            with open(os.path.join(proj, name), "w", encoding="utf-8") as f:
+                f.write(body)
+
+        def run_req(req, *updates):
+            out, t, stop = {}, threading.Thread(target=lambda: out.update(decide(req))), time.monotonic() + 5
+            t.start()
+            while not PENDING:
+                assert time.monotonic() < stop, f"нет карточки: {req}"
+                time.sleep(0.01)
+            rid = next(iter(PENDING))
+            for u in updates:
+                handle_update(json.loads(json.dumps(u).replace("RID", rid)))
+            t.join()
+            return out
+
+        def wait_backups(n):
+            stop = time.monotonic() + 5  # кнопка снимает копию в фоне
+            while len(list_backups()) < n and time.monotonic() < stop:
+                time.sleep(0.02)
+            return list_backups()
+
+        assert backup_targets("Bash", {"command": "git push --force origin main"}, proj) == ([], False)
+        assert backup_targets("Bash", {"command": "echo 1 > src/app.py"}, proj)[0] == [os.path.realpath(os.path.join(proj, "src", "app.py"))]
+        assert backup_targets("Bash", {"command": "rm -rf ~"}, proj)[1]  # весь дом не копируем
+        assert backup_targets("Bash", {"command": f"echo 1 > {os.devnull}"}, proj) == ([], False)  # устройство — не файл
+        BACKUP = "auto"
+        r = run_req({"tool": "Bash", "input": {"command": "rm -rf src && rm .env"}, "cwd": proj}, cb("a:RID"))
+        b = list_backups()  # без ожидания: «пропустить» отдаётся агенту только после копии
+        assert r["decision"] == "allow" and len(b) == 1 and b[0]["files"] == 2, (r, b)
+        files = os.path.join(BACKUP_DIR, b[0]["name"], "files")
+        assert os.path.isfile(os.path.join(files, "src", "app.py")) and os.path.isfile(os.path.join(files, ".env"))
+        assert not os.path.exists(os.path.join(files, "src", "node_modules")), "node_modules копировать незачем"
+        stop = time.monotonic() + 3  # карточку правит фоновый поток — агент Telegram не ждёт
+        while not any("Бэкап:" in p.get("text", "") for m, p in sent[-4:] if m in ("sendMessage", "editMessageText")):
+            assert time.monotonic() < stop, sent[-4:]
+            time.sleep(0.02)
+        key = "sk_live_" + "Q" * 24  # запись файла с боевым ключом — HIGH: копия прежней версии файла
+        r = run_req({"tool": "Write", "input": {"file_path": os.path.join(proj, "src", "app.py"), "content": key}, "cwd": proj}, cb("d:RID"))
+        b = wait_backups(2)
+        assert r["decision"] == "deny" and len(b) == 2 and b[0]["files"] == 1, (r, b)
+        BACKUP = "ask"
+        r = run_req({"tool": "Bash", "input": {"command": "rm -rf src"}, "cwd": proj}, cb("b:RID"), cb("b:RID"), cb("d:RID"))
+        assert r["decision"] == "deny" and '"b:' in keyboard() and len(wait_backups(3)) == 3, r  # второе нажатие — не копия
+        BACKUP = "off"
+        assert run_req({"tool": "Bash", "input": {"command": "rm -rf src"}, "cwd": proj}, cb("b:RID"), cb("d:RID"))["decision"] == "deny"
+        assert '"b:' not in keyboard() and len(list_backups()) == 3
+        import shutil as _sh, subprocess
+        if _sh.which("git"):  # git reset --hard: копия изменённых и новых файлов репозитория
+            BACKUP, repo = "auto", os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            g = lambda *a: subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, check=True)
+            with open(os.path.join(repo, "a.txt"), "w") as f:
+                f.write("1")
+            g("init", "-q"), g("add", "a.txt"), g("commit", "-qm", "init")
+            for name in ("a.txt", "new.txt"):
+                with open(os.path.join(repo, name), "w") as f:
+                    f.write("2")
+            r = run_req({"tool": "Bash", "input": {"command": "git reset --hard"}, "cwd": repo}, cb("d:RID"))
+            b = wait_backups(4)
+            assert r["decision"] == "deny" and b[0]["files"] == 2 and b[0]["cwd"] == repo, b[0]
+        if _sh.which("git"):  # секрет уходит в git: индекс, git add в той же команде, неотправленные коммиты
+            token, leak = "ghp_" + "a1B2" * 9, os.path.join(tmp, "leak")
+            os.makedirs(leak)
+            g2 = lambda *a: subprocess.run(["git", "-C", leak, "-c", "core.fsmonitor=false", "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                           capture_output=True, check=True)
+            put = lambda name, body: open(os.path.join(leak, name), "w", encoding="utf-8").write(body)
+            put("ok.txt", "1"), g2("init", "-q"), g2("add", "ok.txt"), g2("commit", "-qm", "init")
+            marker = os.path.join(tmp, "pwned").replace("\\", "/")  # код из настроек чужого репозитория не должен запуститься
+            evil = os.path.join(tmp, "evil.sh").replace("\\", "/")  # лежит вне репозитория и настоящий: сработал бы, если git его запустит
+            with open(evil, "w", encoding="utf-8", newline="\n") as f:
+                f.write(f"#!/bin/sh\ntouch '{marker}'\n")
+            os.chmod(evil, 0o755)
+            for k, v in (("core.fsmonitor", evil), ("diff.external", evil), ("log.showSignature", "true"), ("gpg.program", evil)):
+                g2("config", k, v)
+            assert git_leaks("git commit -m x", leak) == [] and git_leaks("git status", leak) == []
+            put("config.py", f"TOKEN = '{token}'\n")
+            assert git_leaks("git commit -m x", leak) == [], "ещё не в индексе и git add в команде нет"
+            hit = git_leaks("git add -A && git commit -m x && git push", leak)
+            assert hit and "config.py" in hit[0]["hit"] and token not in hit[0]["hit"], hit  # секрет в карточке скрыт
+            g2("add", "config.py")
+            assert git_leaks("git commit -m x", leak), "в индексе"
+            subprocess.run(["git", "-C", leak, "-c", "core.fsmonitor=false", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "key"],
+                           capture_output=True, check=True)
+            assert git_leaks("git push origin main", leak), "в неотправленном коммите"
+            put(".env", "A=1\n")
+            assert any(".env" in f["hit"] for f in git_leaks("git add . && git commit -m x", leak))
+            assert not os.path.exists(marker.replace("/", os.sep)), "git выполнил код из настроек репозитория"
+            r = run_req({"tool": "Bash", "input": {"command": "git push"}, "cwd": leak}, cb("d:RID"))
+            assert r["decision"] == "deny" and "В git уходит секрет или файл с ключами" in r["findings"], r
+
+            def new_repo(name):
+                d = os.path.join(tmp, name)
+                os.makedirs(d)
+
+                def run_git(*a):
+                    return subprocess.run(["git", "-C", d, "-c", "core.fsmonitor=false", "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                          capture_output=True, check=True, text=True)
+                run_git("init", "-q")
+                return d, run_git
+
+            def save(d, name, body):
+                with open(os.path.join(d, name), "wb") as f:
+                    f.write(body if isinstance(body, bytes) else body.encode())
+
+            def leaked(cmd, where, name=""):
+                return any(name in f["hit"] for f in git_leaks(cmd, where))
+
+            m, gm = new_repo("multi")  # что именно уходит: индекс, git add, commit -a, пути, папка
+            save(m, "ok.txt", "1\n"), gm("add", "ok.txt"), gm("commit", "-qm", "init")
+            save(m, "key.py", f"K = '{token}'\n"), save(m, "notes.txt", "2\n")
+            for c in ('git commit -m "add key.py"', "git add notes.txt && git commit -m x", "git add -n . && git commit -m x",
+                      "git add key.py && git push"):
+                assert not leaked(c, m), c
+            for c in ("git add key.py && git commit -m x", "git add . && git commit -m x", "git add -A && git commit -m x"):
+                assert leaked(c, m, "key.py"), c
+            assert leaked("cd multi && git add -A && git commit -m x", tmp, "key.py"), "cd"
+            assert leaked("git -c a.b=c -C multi add -A && git -C multi commit -m x", tmp, "key.py"), "-C после -c"
+            assert not leaked("cd multi && git add notes.txt && git commit -m x", tmp)
+            os.remove(os.path.join(m, "key.py"))
+            save(m, "ok.txt", f"K = '{token}'\n")
+            assert not leaked("git commit -m x", m), "в индексе ничего нет"
+            for c in ("git commit -am x", "git commit --all -m x", "git commit -qam x", "git commit -m x -- ok.txt", "git commit -m x ok.txt"):
+                assert leaked(c, m, "ok.txt"), c
+            save(m, "ok.txt", "1\n")
+            save(m, "cert.p12", b"\x00\x01key"), save(m, ".env", "A=1\n".encode("utf-16"))  # бинарные и UTF-16: по имени
+            assert leaked("git add cert.p12 && git commit -m x", m, "cert.p12") and leaked("git add .env && git commit -m x", m, ".env")
+            os.remove(os.path.join(m, ".env"))
+            gm("add", "cert.p12")
+            assert leaked("git commit -m x", m, "cert.p12"), "бинарный ключ в индексе"
+            gm("commit", "-qm", "cert")
+            assert leaked("git push", m, "cert.p12"), "бинарный ключ в неотправленном коммите"
+            for remote in ("origin", "other"):  # какая ветка и на какой сервер уходит
+                subprocess.run(["git", "init", "-q", "--bare", os.path.join(tmp, remote + ".git")], capture_output=True, check=True)
+                gm("remote", "add", remote, os.path.join(tmp, remote + ".git"))
+            branch = gm("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+            gm("push", "-q", "origin", branch)
+            gm("checkout", "-q", "-b", "feature")
+            save(m, "feat.py", f"K = '{token}'\n"), gm("add", "feat.py"), gm("commit", "-qm", "feat"), gm("checkout", "-q", branch)
+            for c in ("git push", f"git push origin {branch}", "git push --delete origin feature", "git push origin :feature"):
+                assert not leaked(c, m), c
+            for c in ("git push origin feature", "git push -u origin feature:refs/heads/x", "git push --all origin"):
+                assert leaked(c, m, "feat.py"), c
+            assert leaked(f"git push other {branch}", m, "cert.p12"), "на другом сервере этого коммита ещё нет"
+            gm("push", "-q", "origin", "feature")
+            assert not leaked("git push origin feature", m) and leaked("git push other feature", m, "feat.py")
+            sub_mark, sub_evil = os.path.join(tmp, "sub-pwned"), os.path.join(tmp, "sub-evil.sh")  # настройки подмодуля не выполняются
+            with open(sub_evil, "w", encoding="utf-8", newline="\n") as f:
+                f.write(f"#!/bin/sh\ntouch '{sub_mark.replace(os.sep, '/')}'\n")
+            os.chmod(sub_evil, 0o755)
+            vendor = os.path.join(m, "vendor")
+            os.makedirs(vendor)
+            gv = lambda *a: subprocess.run(["git", "-C", vendor, "-c", "user.name=t", "-c", "user.email=t@t", *a], capture_output=True, check=True)
+            gv("init", "-q"), save(vendor, "a.txt", "1\n"), gv("add", "a.txt"), gv("commit", "-qm", "s")
+            gm("add", "vendor"), gm("commit", "-qm", "vendor")
+            gv("config", "core.fsmonitor", sub_evil.replace(os.sep, "/"))
+            save(vendor, "a.txt", "2\n")
+            git_leaks("git add -A && git commit -m x", m)
+            assert not os.path.exists(sub_mark), "git зашёл в подмодуль и выполнил его настройки"
+        keep_wait, TIMEOUT = TIMEOUT, NO_LIMIT  # «без ограничений»: срока нет, а брошенная карточка закрывается сама
+        assert run_req({"tool": "Bash", "input": {"command": "DROP TABLE users"}}, cb("d:RID"))["decision"] == "deny"
+        assert any("без ограничения" in p.get("text", "") for m, p in sent[-4:]), sent[-4:]
+        assert "без ограничений" in status_text()
+        r = decide({"tool": "Bash", "input": {"command": "DROP TABLE users"}}, lambda: True)
+        assert r["decision"] == "deny" and r["by"] == "gone" and not PENDING, r
+        gone_srv = Server(("127.0.0.1", 0), Handler)  # настоящий хук: закрыл соединение — сервер это заметил
+        threading.Thread(target=gone_srv.serve_forever, daemon=True).start()
+        data = json.dumps({"tool": "Bash", "input": {"command": "DROP TABLE users"}}).encode()
+        client = socket.create_connection(("127.0.0.1", gone_srv.server_port), timeout=5)
+        client.sendall(b"POST /check HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(data) + data)
+        stop = time.monotonic() + 5
+        while not PENDING:
+            assert time.monotonic() < stop, "нет карточки"
+            time.sleep(0.01)
+        assert next(iter(PENDING.values()))["card"]["no_limit"]
+        time.sleep(1.2)
+        assert PENDING, "живой хук ждёт дальше"
+        client.close()
+        stop = time.monotonic() + 5
+        while PENDING:
+            assert time.monotonic() < stop, "карточка брошенного запроса не закрылась"
+            time.sleep(0.02)
+        gone_srv.shutdown()
+        gone_srv.server_close()
+        TIMEOUT = keep_wait
+        newest = list_backups()[0]["name"]
+        for i in range(BACKUP_KEEP + 3):  # хранится не больше BACKUP_KEEP копий, свежие остаются
+            os.makedirs(os.path.join(BACKUP_DIR, f"2000-01-01_00-00-{i:02d}_x"))
+            with open(os.path.join(BACKUP_DIR, f"2000-01-01_00-00-{i:02d}_x", "manifest.json"), "w") as f:
+                json.dump({"bytes": 1}, f)
+        prune_backups()
+        assert len(list_backups()) == BACKUP_KEEP and list_backups()[0]["name"] == newest
+        handle_update(say("/backups", reply=None))
+        assert "Последние бэкапы" in sent[-1][1]["text"], sent[-1]
+        # цели копии: «..», cd, скобки; устройства, junction, лимиты, оборванные копии
+        rp = lambda *a: os.path.realpath(os.path.join(proj, *a))
+        os.makedirs(os.path.join(proj, "sub"), exist_ok=True)
+        assert _plain("..") == ".." and _plain("a/..") == "a/.." and _plain("file.") == "file"
+        assert backup_targets("Bash", {"command": "cd .. && rm -rf src"}, os.path.join(proj, "sub"))[0] == [rp("src")]
+        assert backup_targets("Bash", {"command": "cd src && rm app.py"}, proj)[0] == [rp("src", "app.py")]
+        assert backup_targets("Bash", {"command": "(cd src; rm app.py); rm .env"}, proj)[0] == [rp("src", "app.py"), rp(".env")]
+        assert backup_targets("PowerShell", {"command": "Set-Location src; Remove-Item app.py"}, proj)[0] == [rp("src", "app.py")]
+        box = os.path.realpath(os.path.join(tmp, "box"))
+        os.makedirs(os.path.join(box, "real"))
+        for name, size in (("real/big.bin", 5000), ("real/small.txt", 10)):
+            with open(os.path.join(box, name), "wb") as f:
+                f.write(b"x" * size)
+        saved_max, BACKUP_MAX_BYTES = BACKUP_MAX_BYTES, 1000  # большой файл не входит — маленький всё равно сохраняем
+        b = make_backup("size", {"tool": "Bash", "input": {"command": "rm -rf real"}, "cwd": box}, [os.path.join(box, "real")])
+        BACKUP_MAX_BYTES = saved_max
+        assert b["files"] == 1 and b["truncated"] and os.path.isfile(os.path.join(b["path"], "files", "real", "small.txt")), b
+        outside = os.path.join(tmp, "outside")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "token.txt"), "w") as f:
+            f.write("x")
+        if os.name == "nt":
+            subprocess.run(["cmd", "/c", "mklink", "/J", os.path.join(box, "real", "jump"), outside], capture_output=True, check=True)
+        else:
+            os.symlink(outside, os.path.join(box, "real", "jump"))
+            os.mkfifo(os.path.join(box, "real", "pipe"))  # чтение канала повисло бы навсегда
+        os.remove(os.path.join(box, "real", "big.bin"))
+        b = make_backup("link", {"tool": "Bash", "input": {"command": "rm -rf real\udc80"}, "cwd": box}, [os.path.join(box, "real")])
+        assert b["files"] == 1 and not os.path.exists(os.path.join(b["path"], "files", "real", "jump", "token.txt")), b
+        assert any(x["name"] == os.path.basename(b["path"]) for x in list_backups()), "manifest с «суррогатом» в тексте читается"
+        old, busy = os.path.join(BACKUP_DIR, "2001-01-01_00-00-00_orphan"), os.path.join(BACKUP_DIR, time.strftime("%Y-%m-%d") + "_00-00-00_busy")
+        os.makedirs(old), os.makedirs(busy), os.utime(old, (1e9, 1e9))
+        prune_backups()
+        assert not os.path.exists(old) and os.path.exists(busy), "оборванную копию убираем через сутки, идущую не трогаем"
+        os.rmdir(busy)
+        # ложные тревоги правил и файлы в MCP-инструментах
+        ids = lambda tool, **inp: {f["id"] for f in evaluate(tool, inp)[1]}
+        assert "wipe-root" not in ids("Bash", command=r'rm -rf "C:\Users\John Doe\proj\build"')
+        assert evaluate("Bash", {"cmd": "rm -r /home/x"})[0] >= HIGH, "команда не в поле command — правило не падает"
+        spam = "git " * 40000
+        stop = time.monotonic()
+        assert not git_leaks(spam, proj) and time.monotonic() - stop < 2, "длинная команда не вешает проверку git"
+        assert "wipe-root" in ids("Bash", command=r'rm -rf "C:\Users\John Doe"') and "wipe-root" in ids("Bash", command=r"rm -rf C:\Users\john")
+        sql = "create policy p on t for all to {r} using (true);"
+        assert "rls-off" not in ids("Write", file_path="m.sql", content=sql.format(r="service_role"))
+        assert "rls-off" in ids("Write", file_path="m.sql", content=sql.format(r="authenticated"))
+        assert "rls-off" in ids("Write", file_path="m.sql", content=sql.format(r="anon, service_role"))
+        for name in ("NEXT_PUBLIC_RESET_PASSWORD_URL", "VITE_PASSWORD_MIN_LENGTH", "vite_db_password"):
+            assert "public-env-secret" not in ids("Write", file_path="a.ts", content=f"const x = env.{name}"), name
+        for name in ("VITE_DB_PASSWORD", "NEXT_PUBLIC_STRIPE_SECRET_KEY", "REACT_APP_JWT_SECRET"):
+            assert "public-env-secret" in ids("Write", file_path="a.ts", content=f"const x = env.{name}"), name
+        fire = "allow read, write: if true;"
+        assert "firebase-public" in ids("mcp__fs__write_file", relative_path="firestore.rules", content=fire)
+        assert "firebase-public" in ids("mcp__fs__move_file", destination="firestore.rules", content=fire)
+        assert "firebase-public" not in ids("mcp__fs__read_file", path="firestore.rules", content=fire)
+        assert "firebase-public" not in ids("mcp__docs__searchDocs", path="firestore.rules", content=fire)
+        BACKUP = "auto"
         TIMEOUT = 0.2
         r = run("DROP TABLE users")
         assert r["decision"] == "deny" and r["by"] == "timeout", r
@@ -2022,6 +3126,11 @@ def selftest():
         try:
             code, body = call("/api/settings/save", {"GUARDIAN_TIMEOUT": "120", "GUARDIAN_LANG": "en"})
             assert code == 200 and TIMEOUT == 120 and LANG == "en", body
+            code, body = call("/api/settings/save", {"GUARDIAN_TIMEOUT": "0"})
+            assert code == 200 and TIMEOUT == NO_LIMIT and json.loads(body)["values"]["GUARDIAN_TIMEOUT"] == "0", body
+            assert call("/api/settings/save", {"GUARDIAN_TIMEOUT": "5"})[0] == 400 and TIMEOUT == NO_LIMIT
+            code, body = call("/api/settings/save", {"GUARDIAN_TIMEOUT": "120"})
+            assert code == 200 and TIMEOUT == 120, body
             text = open(ENV_PATH, encoding="utf-8").read()
             assert "# мой комментарий" in text and "GUARDIAN_TIMEOUT=120" in text and "GUARDIAN_LANG=en" in text, text
             assert call("/api/settings/save", {"GUARDIAN_PORT": "9999"})[0] == 400  # порт из окна не меняется

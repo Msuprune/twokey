@@ -1,0 +1,33 @@
+<section id="decision" class="light">
+<div class="row" style="gap:96px; flex:1; align-items:center">
+<div class="col grow" style="gap:0">
+<p class="eyebrow">ДЕМО</p>
+<h2>Решение — одной кнопкой</h2>
+<p class="body" style="margin-bottom:20px"><b>Пропустить</b> — действие выполняется</p>
+<p class="body" style="margin-bottom:20px"><b>Отклонить</b> — агент получает запрет и не ищет обход</p>
+<p class="body" style="margin-bottom:20px"><b>Своё решение</b> — ваш текст становится инструкцией агенту</p>
+<p class="body" style="margin-bottom:20px"><b>Разберусь вручную</b> — агент останавливается и ждёт вас</p>
+<p class="body" style="margin-bottom:36px"><b>Разрешать всегда</b> — только для высокого риска; критичное — по одному разу</p>
+<p class="body">Если действие меняет файлы, копия снимается до вашего решения. Ключи и пароли в карточке скрыты.</p>
+</div>
+<div class="rise" style="--i:1; width:560px; flex:none; background:#0E151D; border-radius:56px; padding:28px; box-sizing:border-box">
+<div style="background:#182330; border-radius:36px; padding:32px; display:flex; flex-direction:column; gap:16px">
+<p class="mono" style="font-size:24px; color:#A7B3BF; margin:0">TwoKey bot</p>
+<div style="background:#F3EFE6; border-radius:20px; padding:28px; display:flex; flex-direction:column; gap:12px">
+<div class="row" style="gap:12px; align-items:center"><x-shape kind="ellipse" style="width:24px; height:24px; background:#FF6B2C"></x-shape><p style="font-size:24px; font-weight:700; color:#0E151D; margin:0">Риск: КРИТИЧЕСКИЙ</p></div>
+<p style="font-size:24px; color:#4A5563; margin:0">агент · Bash</p>
+<p class="mono" style="font-size:24px; color:#0E151D; background:#E4DDCD; border-radius:10px; padding:12px 16px; margin:0">DELETE FROM users;</p>
+<p style="font-size:24px; color:#0E151D; margin:0">Удалит все строки таблицы</p>
+<p style="font-size:24px; color:#4A5563; margin:0">Безопаснее: WHERE + бэкап</p>
+</div>
+<div class="cards c2" style="gap:12px">
+<p class="pill safe" style="text-align:center; border-radius:14px; padding:12px 8px">Пропустить</p>
+<p class="pill" style="text-align:center; border-radius:14px; padding:12px 8px">Отклонить</p>
+<p class="pill" style="text-align:center; border-radius:14px; padding:12px 8px; background:#E4DDCD">Своё решение</p>
+<p class="pill" style="text-align:center; border-radius:14px; padding:12px 8px; background:#E4DDCD">Вручную</p>
+</div>
+</div>
+</div>
+</div>
+<aside>Покажу вживую. (Окно TwoKey на экране, demo.bat.) Безопасное прошло само. Агент вписывает в код боевой ключ Stripe — телефон вибрирует, а в карточке ключ уже скрыт. Отклоняю. Теперь он хочет удалить всех пользователей на проде. Я не просто запрещаю: нажимаю «Своё решение» и пишу «сначала бэкап, удали только тестовых». Агент получает это как инструкцию и продолжает — уже безопасно.</aside>
+</section>

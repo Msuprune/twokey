@@ -53,6 +53,8 @@ section.light .card .txt { color: var(--slate); }
 .card.hot { background: var(--ember); color: var(--ink); }
 .card.hot .txt { color: var(--ink); }
 .card.hot .tag { color: var(--ink); }
+section.light .card.hot { background: var(--ember); }
+section.light .card.hot .txt { color: var(--ink); }
 
 .num { font-size: 120px; font-weight: 700; line-height: 1; letter-spacing: -2px; color: var(--ember); margin: 0; }
 .num-label { font-size: 32px; line-height: 1.3; color: var(--fog); margin: 0; }
@@ -72,14 +74,13 @@ section.light .source { color: var(--slate); }
 <section id="cover">
 <p class="eyebrow rise" style="--i:0">ЗАЩИТА ИИ-АГЕНТОВ</p>
 <h1 class="rise" style="--i:1">TwoKey</h1>
-<p class="lead rise" style="--i:2; margin-top:48px; max-width:1320px">Второй ключ для ИИ-агентов: опасное действие выполняется только после согласия человека</p>
+<p class="lead rise" style="--i:2; margin-top:48px; max-width:1320px">Второй ключ для ИИ-агентов: опасное действие выполняется только с согласия человека</p>
 <div class="grow"></div>
 <div class="row rise" style="--i:3; align-items:center">
 <p class="term">agent › psql -c "DROP TABLE users;"</p>
-<x-icon name="Key" style="color:#FF6B2C; width:56px; height:56px"></x-icon>
-<p class="pill">ждёт второй ключ</p>
+<p class="pill">ждёт человека</p>
 </div>
-<aside>Здравствуйте! Я [имя], и это TwoKey — второй ключ для ИИ-агентов. Сегодня ИИ уже не просто пишет код в чате: агенты сами запускают команды, ходят в базы данных и в облако. Вопрос, который я хочу задать: кто держит второй ключ, когда агент решает удалить таблицу users?</aside>
+<aside>Здравствуйте! Я [имя], это TwoKey — второй ключ для ИИ-агентов. Сегодня агенты сами запускают команды, ходят в базы и в облако. Вопрос: кто остановит агента, когда он решит удалить таблицу users?</aside>
 </section>
 
 <section id="hook" class="accent with-footer">
@@ -89,97 +90,91 @@ section.light .source { color: var(--slate); }
 <p class="lead rise" style="--i:1; margin-top:48px; max-width:1500px">Столько понадобилось ИИ-агенту в Cursor, чтобы удалить продакшн-базу PocketOS вместе с бэкапами. Подтверждения никто не спросил.</p>
 <div class="grow"></div>
 <p class="source" style="color:#0E151D">Источник: ABC7 News, 30.04.2026 — сбой длился около 30 часов</p>
-<aside>Апрель 2026 года. Небольшая компания PocketOS — сервис для прокатов автомобилей. Их ИИ-агент в Cursor споткнулся о неверные учётные данные в тестовом окружении и сам решил «починить» это — удалить том через API хостинга. Девять секунд — и продакшн-база вместе с бэкапами исчезла. Никто не спросил подтверждения: у агента был токен с полными правами. Сервис лежал около тридцати часов.</aside>
+<aside>Апрель 2026-го. ИИ-агент в Cursor за девять секунд удалил продакшн-базу компании PocketOS вместе с бэкапами. Подтверждения никто не спросил. Сервис лежал тридцать часов.</aside>
 </section>
 
 <section id="problem" class="light with-footer">
 <p class="eyebrow">ПРОБЛЕМА</p>
 <h2>Это уже система, а не случайность</h2>
-<table style="font-size:28px; color:#0E151D">
-<tr><th style="width:16%">Когда</th><th style="width:20%">Агент</th><th>Что произошло</th></tr>
-<tr><td>Июль 2025</td><td>Replit Agent</td><td>Во время code freeze стёр продовую базу SaaStr: 1 200+ руководителей, ~1 190 компаний</td></tr>
+<table style="font-size:30px; color:#0E151D">
+<tr><th style="width:18%">Когда</th><th style="width:22%">Агент</th><th>Что произошло</th></tr>
+<tr><td>Июль 2025</td><td>Replit Agent</td><td>Во время заморозки кода стёр рабочую базу SaaStr: 1 200+ руководителей, ~1 190 компаний</td></tr>
 <tr><td>Ноябрь 2025</td><td>Google Antigravity</td><td>Попросили очистить кэш — удалил весь диск D: мимо корзины</td></tr>
-<tr><td>Декабрь 2025</td><td>AWS Kiro</td><td>Решил «удалить и пересоздать окружение»: 13 часов простоя сервиса AWS (по данным FT)</td></tr>
-<tr><td>Февраль 2026</td><td>Claude Code</td><td>terraform destroy на продакшене DataTalks.Club: 2,5 года данных и все снапшоты</td></tr>
+<tr><td>Декабрь 2025</td><td>AWS Kiro</td><td>Решил «удалить и пересоздать окружение»: 13 часов простоя (по данным FT)</td></tr>
 <tr><td>Февраль 2026</td><td>OpenClaw</td><td>Массово удалял почту директора по alignment в Meta и не реагировал на «стоп»</td></tr>
-<tr><td>Апрель 2026</td><td>Cursor</td><td>Удалил продовую базу PocketOS и бэкапы за 9 секунд</td></tr>
+<tr><td>Апрель 2026</td><td>Cursor</td><td>Удалил рабочую базу PocketOS и бэкапы за 9 секунд</td></tr>
 </table>
-<p class="source">Источники: Fortune, The Register, FT via The Decoder, блог А. Григорьева, TechCrunch, ABC7 — ссылки в документе проекта</p>
-<aside>И это не единичный случай. Летом 2025-го агент Replit во время объявленной заморозки кода стёр продовую базу SaaStr — и потом сказал, что откат невозможен, что оказалось неправдой. Агент Google попросили очистить кэш — он удалил весь диск. Агент Amazon решил пересоздать окружение — сервис AWS лежал 13 часов. Claude Code выполнил terraform destroy на продакшене и снёс 2,5 года данных вместе со снапшотами. Это разные компании, разные модели — и одна и та же проблема: у агента есть права, но нет второго ключа.</aside>
+<p class="source">Источники: Fortune, The Register, FT via The Decoder, TechCrunch, ABC7 — ссылки в документе проекта</p>
+<aside>Агент Replit стёр базу во время заморозки кода. Агент Google, очищая кэш, удалил весь диск. Разные компании, разные модели — одна проблема: права у агента есть, а проверки перед необратимым шагом нет.</aside>
 </section>
 
-<section id="whynow" class="with-footer">
+<section id="leaks" class="with-footer">
+<p class="eyebrow">НЕ ТОЛЬКО УДАЛЕНИЕ</p>
+<h2>Агенты сами выносят данные наружу</h2>
+<div class="cards c3">
+<div class="col rise" style="--i:0"><p class="num">13 000+</p><p class="num-label">внутренних изображений оказались в открытом доступе</p></div>
+<div class="col rise" style="--i:1"><p class="num">300+</p><p class="num-label">организаций: счета клиентов, платёжные консоли, закрытые функции</p></div>
+<div class="col rise" style="--i:2"><p class="num">93%</p><p class="num-label">репозиториев создано в личных аккаунтах сотрудников</p></div>
+</div>
+<div class="grow"></div>
+<p class="lead rise" style="--i:3">Чтобы приложить скриншот к pull request, агент сам создавал <span class="em">публичный репозиторий</span>.</p>
+<p class="source">PixelLeak, сентябрь 2026 · данные вендора Glow Labs, независимо не подтверждены · Help Net Security</p>
+<aside>И они не только удаляют. В сентябре компания Glow Labs сообщила: чтобы приложить скриншот к pull request, агенты сами создавали публичные репозитории. Больше тринадцати тысяч внутренних изображений из трёхсот с лишним организаций — счета клиентов, платёжные консоли.</aside>
+</section>
+
+<section id="whynow" class="light with-footer">
 <p class="eyebrow">ПОЧЕМУ СЕЙЧАС</p>
 <h2>Агентов стало вдвое больше, а защиты — нет</h2>
 <div class="cards c3">
 <div class="col rise" style="--i:0"><p class="num">59%</p><p class="num-label">разработчиков уже используют ИИ-агентов на работе. Год назад — 31%</p></div>
 <div class="col rise" style="--i:1"><p class="num">80%</p><p class="num-label">компаний видели, как их ИИ-агенты совершали непредусмотренные действия</p></div>
-<div class="col rise" style="--i:2"><p class="num">×2</p><p class="num-label">чаще утекают секреты в коммитах с Claude Code: 3,2% против 1,5% по GitHub</p></div>
+<div class="col rise" style="--i:2"><p class="num">28,65 млн</p><p class="num-label">новых секретов попали в публичные коммиты GitHub за 2025 год (+34%)</p></div>
 </div>
 <div class="grow"></div>
 <p class="lead rise" style="--i:3"><span class="em">60%</span> разработчиков уже запрещают агентам изменения без одобрения — но делают это вручную.</p>
 <p class="source">Stack Overflow, 2026 (n=1 100) · SailPoint, 2025 (n=353) · GitGuardian, State of Secrets Sprawl 2026</p>
-<aside>Почему сейчас. За год доля разработчиков, которые используют агентов на работе, выросла с 31 до 59 процентов. 80% компаний уже видели, как их агенты делают то, о чём их не просили. Коммиты, сделанные с Claude Code, содержат утёкшие ключи в два раза чаще среднего. И самое важное для нас: 60% разработчиков уже запрещают агентам изменения без одобрения. Спрос на второй ключ есть — просто сейчас этот ключ поворачивают вручную, сидя у монитора.</aside>
-</section>
-
-<section id="solution" class="light">
-<p class="eyebrow">РЕШЕНИЕ</p>
-<h2>TwoKey встаёт между агентом и миром</h2>
-<div class="cards c3">
-<div class="card rise" style="--i:0"><p class="tag">01 · перехват</p><h3>Каждое действие проходит через TwoKey</h3><p class="txt">Хук срабатывает до запуска команды, записи файла или вызова MCP-инструмента. Изнутри агент его не обойдёт.</p></div>
-<div class="card rise" style="--i:1"><p class="tag">02 · оценка</p><h3>Правила + AI-судья</h3><p class="txt">Правила срабатывают за миллисекунды и не поддаются prompt injection. AI-судья видит контекст, но может только повысить риск.</p></div>
-<div class="card hot rise" style="--i:2"><p class="tag">03 · второй ключ</p><h3>Человек решает в Telegram</h3><p class="txt">Пропустить, отклонить, предложить своё решение или разобраться вручную. Нет ответа — отказ.</p></div>
-</div>
-<div class="grow"></div>
-<p class="lead">Безопасное — без задержки. Опасное — только с вашего согласия.</p>
-<aside>TwoKey встаёт между агентом и миром. Каждое действие агента — команда, запись файла, вызов инструмента — проходит через нас до того, как выполнится. Сначала правила: они срабатывают за миллисекунды, и их нельзя уговорить, в отличие от нейросети. Затем AI-судья: он видит контекст и предлагает безопасную альтернативу, но может только повысить уровень риска — никогда не понизить. И если действие опасное, второй ключ поворачивает человек — в Telegram, одной кнопкой. Важно: это не «скилл» и не просьба в промпте вести себя хорошо. Это хук, который исполняет среда агента; агент не может его проигнорировать.</aside>
+<aside>По опросу Stack Overflow, за год доля разработчиков с агентами выросла с 31 до 59 процентов. По данным SailPoint, 80% компаний уже видели непредусмотренные действия своих агентов.</aside>
 </section>
 
 <section id="how">
 <p class="eyebrow">КАК РАБОТАЕТ</p>
-<h2>Путь одного действия</h2>
+<h2>Проверяем действие, а не промпт</h2>
 <div class="row" style="gap:16px; align-items:stretch">
-<div class="card grow rise" style="--i:0"><h3>ИИ-агент</h3><p class="txt">Claude Code, Cursor, любой MCP</p></div>
-<x-shape kind="arrow-right" class="rise" style="--i:1; width:48px; height:24px; background:#A7B3BF; align-self:center"></x-shape>
-<div class="card grow rise" style="--i:1"><h3>Перехват</h3><p class="txt">хук или HTTP API, до запуска</p></div>
-<x-shape kind="arrow-right" class="rise" style="--i:2; width:48px; height:24px; background:#A7B3BF; align-self:center"></x-shape>
-<div class="card grow rise" style="--i:2"><h3>Правила</h3><p class="txt">за мс, не обмануть</p></div>
-<x-shape kind="arrow-right" class="rise" style="--i:3; width:48px; height:24px; background:#A7B3BF; align-self:center"></x-shape>
-<div class="card grow rise" style="--i:3"><h3>AI-судья</h3><p class="txt">только повышает риск</p></div>
-<x-shape kind="arrow-right" class="rise" style="--i:4; width:48px; height:24px; background:#A7B3BF; align-self:center"></x-shape>
-<div class="card hot grow rise" style="--i:4"><h3>Telegram</h3><p class="txt">второй ключ у человека</p></div>
+<div class="card grow rise" style="--i:0; flex-basis:0"><h3>ИИ-агент</h3><p class="txt">подключается хуком или через HTTP API</p></div>
+<x-shape kind="arrow-right" class="rise" style="--i:1; width:48px; height:24px; background:#A7B3BF; align-self:center; flex:none"></x-shape>
+<div class="card grow rise" style="--i:1; flex-basis:0"><h3>Правила</h3><p class="txt">доли миллисекунды, их нельзя уговорить</p></div>
+<x-shape kind="arrow-right" class="rise" style="--i:2; width:48px; height:24px; background:#A7B3BF; align-self:center; flex:none"></x-shape>
+<div class="card grow rise" style="--i:2; flex-basis:0"><h3>AI-судья</h3><p class="txt">по желанию: облако или своя модель; только повышает риск</p></div>
+<x-shape kind="arrow-right" class="rise" style="--i:3; width:48px; height:24px; background:#A7B3BF; align-self:center; flex:none"></x-shape>
+<div class="card hot grow rise" style="--i:3; flex-basis:0"><h3>Человек</h3><p class="txt">решает в Telegram или в окне TwoKey</p></div>
 </div>
-<div class="row rise" style="--i:5; margin-top:48px; align-items:center">
-<p class="pill safe">риск ниже HIGH</p>
-<p class="body">пропуск без задержки, MEDIUM пишется в журнал</p>
+<div class="grow"></div>
+<div class="cards c3 rise" style="--i:4">
+<div class="card"><p class="tag">Безопасное</p><p class="txt">проходит без задержки</p></div>
+<div class="card"><p class="tag">Опасное</p><p class="txt">ждёт вашего решения</p></div>
+<div class="card"><p class="tag">Нет ответа или сбой</p><p class="txt">действие не выполняется</p></div>
 </div>
-<div class="cards c4 rise" style="--i:6; margin-top:48px">
-<div class="card"><p class="tag">Пропустить</p><p class="txt">действие выполняется</p></div>
-<div class="card"><p class="tag">Отклонить</p><p class="txt">запрет, без обходных путей</p></div>
-<div class="card"><p class="tag">Своё решение</p><p class="txt">ваш текст — инструкция агенту</p></div>
-<div class="card"><p class="tag">Вручную</p><p class="txt">агент остановлен</p></div>
-</div>
-<aside>Вот путь одного действия. Агент решил выполнить команду. Хук перехватывает её до запуска и отправляет в TwoKey. Правила сразу отсекают очевидное: безопасное проходит без задержки, средний риск пишется в журнал. Если риск высокий или критический, подключается AI-судья — он объясняет простыми словами, что случится, и предлагает альтернативу. И сообщение уходит в Telegram. У человека четыре варианта: пропустить, отклонить, написать своё решение — тогда агент получит его как инструкцию — или остановить агента и разобраться вручную. Если никто не ответил за пять минут, упал сервер или Telegram — действие блокируется. Мы всегда ошибаемся в сторону безопасности.</aside>
+<aside>TwoKey встаёт между агентом и миром и проверяет само действие, а не промпт. Сначала правила — за доли миллисекунды, их нельзя уговорить. Затем, по желанию, AI-судья — облачный или своя модель без интернета. Опасное действие ждёт человека — в Telegram и в окне TwoKey. Нет ответа — отказ.</aside>
 </section>
 
-<section id="telegram" class="light">
+<section id="decision" class="light">
 <div class="row" style="gap:96px; flex:1; align-items:center">
 <div class="col grow" style="gap:0">
 <p class="eyebrow">ДЕМО</p>
-<h2>Решение — одной кнопкой с телефона</h2>
-<p class="body" style="margin-bottom:24px"><b>Пропустить</b> — действие выполняется</p>
-<p class="body" style="margin-bottom:24px"><b>Отклонить</b> — агент получает запрет и не ищет обход</p>
-<p class="body" style="margin-bottom:24px"><b>Своё решение</b> — ваш текст становится инструкцией агенту</p>
-<p class="body" style="margin-bottom:24px"><b>Разберусь вручную</b> — агент остановлен</p>
-<p class="body" style="margin-bottom:40px"><b>Разрешать всегда</b> — при высоком риске такое же действие дальше пройдёт само; критичное — только по одному разу</p>
-<p class="body">Нет ответа 5 минут — отказ. Ключи и пароли в сообщении скрыты.</p>
+<h2>Решение — одной кнопкой</h2>
+<p class="body" style="margin-bottom:20px"><b>Пропустить</b> — действие выполняется</p>
+<p class="body" style="margin-bottom:20px"><b>Отклонить</b> — агент получает запрет и не ищет обход</p>
+<p class="body" style="margin-bottom:20px"><b>Своё решение</b> — ваш текст становится инструкцией агенту</p>
+<p class="body" style="margin-bottom:20px"><b>Разберусь вручную</b> — агент останавливается и ждёт вас</p>
+<p class="body" style="margin-bottom:36px"><b>Разрешать всегда</b> — только для высокого риска; критичное — по одному разу</p>
+<p class="body">Если действие меняет файлы, копия снимается до вашего решения. Ключи и пароли в карточке скрыты.</p>
 </div>
-<div class="rise" style="--i:1; width:560px; background:#0E151D; border-radius:56px; padding:28px; box-sizing:border-box">
+<div class="rise" style="--i:1; width:560px; flex:none; background:#0E151D; border-radius:56px; padding:28px; box-sizing:border-box">
 <div style="background:#182330; border-radius:36px; padding:32px; display:flex; flex-direction:column; gap:16px">
 <p class="mono" style="font-size:24px; color:#A7B3BF; margin:0">TwoKey bot</p>
 <div style="background:#F3EFE6; border-radius:20px; padding:28px; display:flex; flex-direction:column; gap:12px">
 <div class="row" style="gap:12px; align-items:center"><x-shape kind="ellipse" style="width:24px; height:24px; background:#FF6B2C"></x-shape><p style="font-size:24px; font-weight:700; color:#0E151D; margin:0">Риск: КРИТИЧЕСКИЙ</p></div>
-<p style="font-size:24px; color:#4A5563; margin:0">claude-code · Bash</p>
+<p style="font-size:24px; color:#4A5563; margin:0">агент · Bash</p>
 <p class="mono" style="font-size:24px; color:#0E151D; background:#E4DDCD; border-radius:10px; padding:12px 16px; margin:0">DELETE FROM users;</p>
 <p style="font-size:24px; color:#0E151D; margin:0">Удалит все строки таблицы</p>
 <p style="font-size:24px; color:#4A5563; margin:0">Безопаснее: WHERE + бэкап</p>
@@ -193,38 +188,67 @@ section.light .source { color: var(--slate); }
 </div>
 </div>
 </div>
-<aside>[ЖИВОЕ ДЕМО, 40 секунд] Сейчас я запущу агента, который «убирается» в базе. Смотрите на экран телефона. (Запускаю python guardian.py demo.) Безопасные команды прошли сами. А вот агент хочет выполнить DELETE FROM users без WHERE на продакшне — и мне приходит сообщение: что он хочет сделать, почему это опасно, как сделать безопаснее. Я нажимаю «Своё решение» и пишу: «сначала сделай бэкап и удали только тестовых пользователей». Агент получает это как инструкцию и продолжает работу — уже безопасно. Обратите внимание: ключ Stripe, который агент пытался вписать в код, в сообщении скрыт — мы не сливаем секрет, сообщая о его утечке. И ещё одна кнопка — «Разрешать всегда»: если агент каждый день публикует пакет, второй раз спрашивать не нужно. Но на критичных действиях, вроде удаления таблицы, этой кнопки нет — их разрешают только по одному разу.</aside>
+<aside>Покажу вживую. (Окно TwoKey на экране, demo.bat.) Безопасное прошло само. Агент вписывает в код боевой ключ Stripe — телефон вибрирует, а в карточке ключ уже скрыт. Отклоняю. Теперь он хочет удалить всех пользователей на проде. Я не просто запрещаю: нажимаю «Своё решение» и пишу «сначала бэкап, удали только тестовых». Агент получает это как инструкцию и продолжает — уже безопасно.</aside>
 </section>
 
-<section id="catch">
-<p class="eyebrow">ЧТО ЛОВИМ</p>
-<h2>Девять классов опасных действий</h2>
+<section id="protect" class="light">
+<p class="eyebrow">ЗАЩИТА ОТ УТЕЧЕК</p>
+<h2>Данные не уйдут незаметно</h2>
 <div class="cards c3" style="gap:24px">
-<div class="card rise" style="--i:0; padding:32px"><h3>Базы данных</h3><p class="txt">DROP, TRUNCATE, DELETE и UPDATE без WHERE, сброс миграций</p></div>
-<div class="card rise" style="--i:1; padding:32px"><h3>Утечка секретов</h3><p class="txt">ключи AWS, GitHub, Stripe, LLM в коде и в URL, отправка .env</p></div>
-<div class="card rise" style="--i:2; padding:32px"><h3>Публичный доступ</h3><p class="txt">открытый репозиторий, бакет, порт, туннель ngrok</p></div>
-<div class="card rise" style="--i:3; padding:32px"><h3>Файлы и диски</h3><p class="txt">rm -rf по дому и проекту, find -delete, mkfs</p></div>
-<div class="card rise" style="--i:4; padding:32px"><h3>Git</h3><p class="txt">force push в main, reset --hard, git add .env</p></div>
-<div class="card rise" style="--i:5; padding:32px"><h3>Инфраструктура</h3><p class="txt">terraform destroy, kubectl delete, деплой в прод</p></div>
-<div class="card rise" style="--i:6; padding:32px"><h3>Чужой код</h3><p class="txt">curl | bash, закодированные команды</p></div>
-<div class="card rise" style="--i:7; padding:32px"><h3>MCP-инструменты</h3><p class="txt">delete, send, pay, deploy в имени инструмента</p></div>
-<div class="card hot rise" style="--i:8; padding:32px"><h3>Самозащита</h3><p class="txt">агент правит настройки защиты или выключает TwoKey</p></div>
+<div class="card rise" style="--i:0"><h3>Публичные репозитории</h3><p class="txt">создание, смена видимости, гисты, загрузчики скриншотов</p></div>
+<div class="card rise" style="--i:1"><h3>Вынос наружу</h3><p class="txt">webhook, файлообменники, данные внутри DNS-запросов</p></div>
+<div class="card rise" style="--i:2"><h3>Сторонний ИИ</h3><p class="txt">файлы и код, которые агент отправляет во внешний ИИ-сервис</p></div>
+<div class="card hot rise" style="--i:3"><h3>Ключи в git</h3><p class="txt">перед commit и push смотрим, что реально уходит</p></div>
+<div class="card rise" style="--i:4"><h3>Кража токенов</h3><p class="txt">менеджеры паролей, метаданные облака, переменные окружения</p></div>
+<div class="card rise" style="--i:5"><h3>Опасные настройки</h3><p class="txt">открытые Firebase и Supabase, SAS-ссылки, чужие MCP-серверы</p></div>
 </div>
-<aside>Что именно мы ловим. Девять классов действий — от удаления базы до публикации бакета с паспортами клиентов в открытый доступ. Отдельно обратите внимание на последнюю карточку: если агент попытается отключить саму защиту — поправить свои настройки или остановить TwoKey, — это критический уровень. Сторож, которого можно выключить изнутри, не сторож.</aside>
+<aside>Дальше force push и публичный бакет с данными клиентов: так и начинаются утечки. Отклоняю — и ничего не утекло. А если действие меняет файлы, TwoKey ещё до ответа снимает их копию.</aside>
+</section>
+
+<section id="product">
+<p class="eyebrow">ПРОДУКТ</p>
+<h2>Отдельная программа, которая работает у вас</h2>
+<div class="cards c3">
+<div class="col rise" style="--i:0"><p class="num">85</p><p class="num-label">встроенных правил: базы, файлы, git, утечки, облака, деньги</p></div>
+<div class="col rise" style="--i:1"><p class="num">24</p><p class="num-label">готовых шаблона включаются одним переключателем</p></div>
+<div class="col rise" style="--i:2"><p class="num">3</p><p class="num-label">языка: русский, English, қазақша</p></div>
+</div>
+<div class="grow"></div>
+<div class="cards c3 rise" style="--i:3">
+<div class="card"><h3>Окно TwoKey</h3><p class="txt">решения, журнал, правила и настройки; Telegram необязателен</p></div>
+<div class="card"><h3>Свой AI-судья</h3><p class="txt">облачный API, локальная модель или своя программа</p></div>
+<div class="card"><h3>Внутри контура</h3><p class="txt">правила и журнал остаются на вашем компьютере</p></div>
+</div>
+<aside>TwoKey — отдельная программа с установщиком. Решения можно принимать прямо в окне, судью можно поставить локально, и всё это работает на вашем компьютере.</aside>
+</section>
+
+<section id="selfguard" class="accent">
+<p class="eyebrow">ИСТОРИЯ ИЗ РАЗРАБОТКИ</p>
+<h2>Защиту меняет только человек</h2>
+<div class="row" style="gap:16px; align-items:stretch">
+<div class="card grow rise" style="--i:0; flex-basis:0; background:#0E151D; color:#F3EFE6"><p class="tag">01</p><h3>ИИ-агент пишет установщик TwoKey</h3></div>
+<x-shape kind="arrow-right" class="rise" style="--i:1; width:48px; height:24px; background:#0E151D; align-self:center; flex:none"></x-shape>
+<div class="card grow rise" style="--i:1; flex-basis:0; background:#0E151D; color:#F3EFE6"><p class="tag">02</p><h3>Установщик меняет защиту — TwoKey останавливает агента</h3></div>
+<x-shape kind="arrow-right" class="rise" style="--i:2; width:48px; height:24px; background:#0E151D; align-self:center; flex:none"></x-shape>
+<div class="card grow rise" style="--i:2; flex-basis:0; background:#0E151D; color:#F3EFE6"><p class="tag">03</p><h3>Пока человек не нажал кнопку, файл не появился</h3></div>
+</div>
+<div class="grow"></div>
+<p class="lead rise" style="--i:3">Любое действие с папкой, настройками и сервером TwoKey — только с согласия человека.</p>
+<aside>История из разработки. ИИ-агент по моей просьбе писал установщик TwoKey. Но установщик меняет саму защиту — и TwoKey остановил агента и спросил меня. Пока я не нажал кнопку, файл не появился, хотя задачу агенту дал я сам.</aside>
 </section>
 
 <section id="proof" class="with-footer">
 <p class="eyebrow">ДОКАЗАТЕЛЬСТВА</p>
-<h2 style="font-size:60px">MVP работает и проверен на слепом тесте</h2>
+<h2 style="font-size:60px">Проверено на громких случаях и настоящей работе</h2>
 <div class="cards c3">
-<div class="col rise" style="--i:0"><p class="num">88%</p><p class="num-label">опасных действий поймано одними правилами: 53 из 60, без AI-судьи</p></div>
-<div class="col rise" style="--i:1"><p class="num">1%</p><p class="num-label">ложных тревог на 80 обычных действиях агента — человека не заваливает уведомлениями</p></div>
-<div class="col rise" style="--i:2"><p class="num">0,14 мс</p><p class="num-label">средняя проверка действия: безопасное проходит без задержки</p></div>
+<div class="col rise" style="--i:0"><p class="num">35</p><p class="num-label">громких случаев разобрано: 21 ловим, 11 — частично, 3 вне нашей зоны</p></div>
+<div class="col rise" style="--i:1"><p class="num">3 700+</p><p class="num-label">настоящих действий агента — и всего 2 тревоги новых правил</p></div>
+<div class="col rise" style="--i:2"><p class="num">88%</p><p class="num-label">опасного поймали на слепом наборе при 1% ложных тревог</p></div>
 </div>
 <div class="grow"></div>
-<p class="lead rise" style="--i:3">Почему не спрашивать обо всём: когда людей спрашивают про каждое действие, они останавливают лишь <span class="em">13,6%</span> опасных команд.</p>
-<p class="source">Наборы писали ИИ-агенты, не видевшие правил; после доработки 59/60 — уже не слепой замер · Anthropic, 2026, n=1 053</p>
-<aside>Что уже сделано. MVP работает: хук для Claude Code, сервер, Telegram-бот с четырьмя кнопками, AI-судья. Мы проверили его честно: тестовые наборы написали независимые ИИ-агенты, которые не видели наших правил. Одни правила, без нейросети, поймали 53 из 60 опасных действий — 88% — и подняли ложную тревогу на одном действии из 80 обычных. Проверка занимает доли миллисекунды. И это важно: Anthropic в эксперименте на тысяче тестировщиков показала, что если спрашивать человека обо всём, он одобряет не глядя и ловит только 13,6% опасных команд. Поэтому TwoKey беспокоит человека только тогда, когда это действительно нужно.</aside>
+<p class="lead rise" style="--i:3">Зовём человека только когда нужно: среди обычных запросов явно опасную команду остановили лишь <span class="em">13,6%</span> тестировщиков.</p>
+<p class="source">docs/INCIDENTS.md · слепой набор: первая версия правил, 53 из 60 и 1 из 80 · Anthropic, 2026, n=1 053</p>
+<aside>Мы разобрали 35 громких случаев: 21 ловим, 11 — частично, 3 вне нашей зоны. На настоящих действиях агента новые правила поднимают тревогу редко. Это важно: в эксперименте Anthropic явно опасную команду среди обычных запросов остановили лишь 13,6% тестировщиков. Поэтому TwoKey зовёт человека только когда нужно.</aside>
 </section>
 
 <section id="market" class="light with-footer">
@@ -251,80 +275,49 @@ section.light .source { color: var(--slate); }
 </div>
 </div>
 <p class="source">MarketsandMarkets · Gartner (2025, 2026) · * оценки СМИ (Globes, Calcalist, WSJ), официально не раскрыты</p>
-<aside>Рынок. ИИ-агенты — это 52 с половиной миллиарда долларов к 2030 году. Gartner выделил отдельную категорию — «агенты-стражи», ИИ, который контролирует других агентов, — и даёт ей 10–15% рынка агентного ИИ. Расходы на защиту ИИ в 2027 вырастут почти на 70%. А крупные игроки кибербеза уже скупают стартапы этой области: Palo Alto, Cisco, Check Point, CrowdStrike — сделки по 200–700 миллионов долларов. В России своя причина: ФСТЭК готовит требование контролировать действия ИИ-агентов в госсистемах, а закон о локализации данных делает облачные зарубежные фильтры рискованными. Нужен продукт, который работает внутри контура.</aside>
+<aside>Gartner прогнозирует «агентам-стражам» 10–15% рынка агентного ИИ к 2030 году, а Palo Alto, Cisco и CrowdStrike, по данным СМИ, уже купили стартапы по защите ИИ за сотни миллионов долларов.</aside>
 </section>
 
 <section id="competitors" class="with-footer">
 <p class="eyebrow">КОНКУРЕНТЫ</p>
 <h2 style="font-size:60px">Одни спрашивают обо всём, другие — ни о чём</h2>
-<table style="font-size:24px; color:#F3EFE6">
+<table style="font-size:26px; color:#F3EFE6">
 <tr><th style="width:26%">Кто</th><th style="width:37%">Что делает</th><th>Чего не хватает</th></tr>
-<tr><td>Claude Code auto mode и Channels</td><td>Классификатор действий; пересылка разрешений в Telegram (research preview)</td><td>Только Claude Code; ответ только «да/нет»</td></tr>
+<tr><td>Встроенные режимы агентов</td><td>Ручные подтверждения или автоматический классификатор</td><td>Свои у каждого агента; ответ только «да/нет»</td></tr>
 <tr><td>Pushary ($9,99/мес)</td><td>Approve/Deny на экране блокировки, хуки для 4 агентов</td><td>Нет оценки риска: каждый запрос — к человеку</td></tr>
 <tr><td>Bay ($50 млн)</td><td>Проверяет действие агента до выполнения</td><td>Блокирует сам, без человека; для крупных компаний США</td></tr>
 <tr><td>Lakera, Prompt Security, NeMo Guardrails</td><td>Фильтруют промпты и ответы модели</td><td>Не видят само действие: команду, SQL, деплой</td></tr>
 </table>
 <div class="grow"></div>
-<p class="lead" style="font-size:32px"><span class="em">TwoKey:</span> оценка риска + человек только для критичного + 4 варианта ответа + любой агент + работа внутри контура.</p>
-<p class="source">Сайты и документация компаний, VentureBeat (10.11.2026), Anthropic (2026) — ссылки в документе проекта</p>
-<aside>Конкуренты. Рынок делится на два лагеря. Одни спрашивают человека обо всём — как Pushary или пересылка разрешений в самом Claude Code: человек устаёт и одобряет не глядя. Другие не спрашивают ни о чём — как Bay, который блокирует сам, или классификатор auto mode: решение принимает машина, и, по данным самой Anthropic, она пропускает часть опасных действий. Фильтры вроде Lakera вообще смотрят на текст, а не на действие. TwoKey посередине: машина отсеивает 99% рутины, а человек поворачивает второй ключ только там, где ошибка необратима, — и может не просто сказать «нет», а дать агенту своё решение.</aside>
+<p class="lead" style="font-size:32px"><span class="em">TwoKey:</span> оценка риска + человек только для опасного + своё решение вместо «да/нет» + разные агенты + работа внутри контура.</p>
+<p class="source">Сайты и документация компаний, VentureBeat (10.11.2026) — ссылки в документе проекта</p>
+<aside>Одни спрашивают человека обо всём, и он устаёт. Другие не спрашивают ни о чём, и решение принимает машина. Фильтры смотрят на текст, а не на действие. TwoKey зовёт человека только там, где ошибка необратима, и даёт ему не только «нет», но и своё решение.</aside>
 </section>
 
 <section id="model" class="light">
 <p class="eyebrow">БИЗНЕС-МОДЕЛЬ</p>
 <h2>Open-core: ядро бесплатно, платят команды</h2>
 <div class="cards c3">
-<div class="card rise" style="--i:0"><p class="tag">Open Source</p><p class="num" style="font-size:72px; color:#0E151D">0 ₽</p><p class="txt">Хук, правила, Telegram-бот, журнал. Канал привлечения разработчиков.</p></div>
+<div class="card rise" style="--i:0"><p class="tag">Ядро</p><p class="num" style="font-size:72px; color:#0E151D">0 ₽</p><p class="txt">Правила, окно, Telegram-бот, журнал, бэкапы. Код откроем — это канал привлечения разработчиков.</p></div>
 <div class="card hot rise" style="--i:1"><p class="tag">Team</p><p class="num" style="font-size:72px; color:#0E151D">990 ₽</p><p class="txt">за разработчика в месяц. Общие политики, роли одобряющих, дашборд и аудит, AI-судья включён.</p></div>
-<div class="card rise" style="--i:2"><p class="tag">Enterprise</p><p class="num" style="font-size:72px; color:#0E151D">1,5 млн ₽</p><p class="txt">в год и выше. On-prem без внешних сервисов, SSO, выгрузка в SIEM, отчёты для ИБ, SLA.</p></div>
+<div class="card rise" style="--i:2"><p class="tag">Enterprise</p><p class="num" style="font-size:72px; color:#0E151D">1,5 млн ₽</p><p class="txt">в год и выше. Установка внутри контура, SSO, выгрузка в SIEM, отчёты для ИБ, SLA.</p></div>
 </div>
 <div class="grow"></div>
 <p class="lead">Команда из 10 разработчиков — 118 800 ₽ в год. Цены — гипотеза, проверяем на пилотах.</p>
-<aside>Модель — open-core. Ядро бесплатное и открытое: так разработчики начинают пользоваться без согласований. Деньги приносят команды: общие правила на все проекты, роли — кто имеет право одобрять, дашборд и аудит. Крупным компаниям — банкам, финтеху — нужен on-prem без внешних сервисов, интеграция с SIEM и отчёты для службы безопасности. Цены сейчас гипотеза; первое, что мы проверяем на пилотах, — сколько для команды стоит одна авария.</aside>
+<aside>Ядро TwoKey бесплатное, и мы откроем его код; платят команды — за общие политики и аудит — и компании — за установку внутри контура.</aside>
 </section>
 
-<section id="roadmap">
-<p class="eyebrow">ДОРОЖНАЯ КАРТА</p>
-<h2>Платить начинают после проверки пилотами</h2>
-<div class="cards c4" style="gap:24px">
-<div class="card hot rise" style="--i:0"><p class="tag">сейчас</p><h3>MVP</h3><p class="txt">Хук Claude Code, правила, AI-судья, Telegram-кнопки и «разрешать всегда»</p></div>
-<div class="card rise" style="--i:1"><p class="tag">месяцы 1–2</p><h3>Пилоты</h3><p class="txt">3–5 команд бесплатно, правила по их логам, релиз open source</p></div>
-<div class="card rise" style="--i:2"><p class="tag">месяцы 3–6</p><h3>Team</h3><p class="txt">MCP-прокси для любых агентов, Cursor, Codex, Slack, дашборд</p></div>
-<div class="card rise" style="--i:3"><p class="tag">месяцы 6–12</p><h3>Enterprise</h3><p class="txt">On-prem, SSO, SIEM, отчёты для ИБ, свои правила</p></div>
-</div>
-<div class="row rise" style="--i:4; margin-top:56px; gap:24px">
-<div class="grow" style="border-top:2px solid #2A3847; padding-top:24px"><p class="body">Проверка 1: три пилота пользуются каждый день</p></div>
-<div class="grow" style="border-top:2px solid #2A3847; padding-top:24px"><p class="body">Проверка 2: пилоты готовы платить</p></div>
-<div class="grow" style="border-top:2px solid #2A3847; padding-top:24px"><p class="body">Проверка 3: первый запрос на on-prem</p></div>
-</div>
-<aside>План на год. MVP уже работает. Следующие два месяца — бесплатные пилоты с тремя-пятью командами: настраиваем правила на их реальных логах и выкладываем ядро в open source. Дальше — MCP-прокси, чтобы TwoKey защищал любого агента, а не только Claude Code, плюс Slack и дашборд для команд. И Enterprise: on-prem и отчёты для службы безопасности. Каждый следующий этап открывает не дата, а проверка: пользуются ли пилоты каждый день, готовы ли платить, пришёл ли первый запрос на on-prem.</aside>
-</section>
-
-<section id="ask" class="light">
-<p class="eyebrow">КОМАНДА И ЗАПРОС</p>
-<h2>Что нам нужно, чтобы дойти до первых платящих команд</h2>
-<div class="row" style="gap:48px; align-items:stretch">
-<div class="col grow" style="gap:24px">
-<div class="card"><h3>[Имя Фамилия]</h3><p class="txt">[роль: продукт и разработка · опыт: …]</p></div>
-<div class="card"><h3>[Имя Фамилия]</h3><p class="txt">[роль: продажи и пилоты · опыт: …]</p></div>
-</div>
-<div class="col grow" style="gap:24px">
-<div class="card hot"><p class="tag">Запрос</p><p class="num" style="font-size:72px; color:#0E151D">[__] ₽</p><p class="txt">на 6 месяцев: пилоты, MCP-прокси, первый Enterprise-клиент</p></div>
-<div class="card"><p class="tag">Ищем</p><p class="txt">3–5 команд, которые уже работают с ИИ-агентами, — для бесплатного пилота. Ментора по B2B-продажам в информационной безопасности.</p></div>
-</div>
-</div>
-<aside>Мы — [команда, 1–2 предложения: кто вы и почему именно вы это сделаете]. Мы просим [сумма] на шесть месяцев: пилоты, MCP-прокси и первый Enterprise-клиент. А прямо сегодня ищем три-пять команд, которые уже пустили ИИ-агентов в свои репозитории и базы, — для бесплатного пилота. Если это вы — подойдите после выступления.</aside>
-</section>
-
-<section id="close" class="accent">
+<section id="ask" class="accent">
+<p class="eyebrow">ЗАПРОС</p>
+<p class="lead rise" style="--i:0; max-width:1560px">Ищем 3–5 команд с ИИ-агентами для бесплатного пилота и [сумма] на первый год.</p>
 <div class="grow"></div>
-<p class="rise" style="--i:0; font-size:112px; font-weight:700; line-height:1.05; letter-spacing:-2px; margin:0">Дайте агентам свободу.<br>Второй ключ оставьте себе.</p>
+<p class="rise" style="--i:1; font-size:112px; font-weight:700; line-height:1.05; letter-spacing:-2px; margin:0">Дайте агентам свободу.<br>Второй ключ оставьте себе.</p>
 <div class="grow"></div>
-<div class="row rise" style="--i:1; align-items:center; justify-content:space-between">
+<div class="row rise" style="--i:2; align-items:center; justify-content:space-between">
 <p style="font-size:44px; font-weight:700; margin:0">TwoKey</p>
-<p class="mono" style="font-size:32px; margin:0">[контакт] · [github.com/…]</p>
+<p class="mono" style="font-size:32px; margin:0">[контакт]</p>
 </div>
-<aside>ИИ-агенты будут делать всё больше работы — и это хорошо. Но необратимое действие должно требовать двух ключей. Дайте агентам свободу. Второй ключ оставьте себе. Спасибо! Готов ответить на вопросы.</aside>
+<aside>Мы ищем три-пять команд с ИИ-агентами для бесплатного пилота и [сумма] на первый год. Дайте агентам свободу. Второй ключ оставьте себе. Спасибо!</aside>
 </section>
 
 </body></html>

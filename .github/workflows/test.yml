@@ -26,6 +26,7 @@ jobs:
           python guardian.py bench tests/bench.jsonl
           python guardian.py bench tests/holdout_danger.jsonl
           python guardian.py bench tests/holdout_safe.jsonl
+          python guardian.py bench tests/incidents.jsonl
       - name: Переводы (en, kk)
         run: python tools/i18n.py check
       - name: Установщик (слияние хуков на временных файлах)
