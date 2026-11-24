@@ -21,6 +21,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Самопроверка
         run: python guardian.py test
+      - name: Демо без Telegram (имитация по сценарию)
+        run: python demo.py --auto --delay 0
       - name: Точность правил (ред-тим и слепой набор)
         shell: bash  # на Windows иначе учитывался бы код только последней команды
         run: |
