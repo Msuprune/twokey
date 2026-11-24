@@ -25,7 +25,50 @@ def plain(text):
     return html.unescape(re.sub(r"<[^>]+>", "", text))
 
 
+SAY = ["Проверю, что в репозитории.", "Почищу зависимости и поставлю заново.", "Подключу оплату: впишу ключ Stripe прямо в код.",
+       "Тестовые данные мешают — удалю пользователей в базе.", "Ветка разошлась с main — отправлю принудительно.",
+       "Открою бакет с файлами клиентов, чтобы коллеги скачали.", "Старая таблица заказов не нужна — удалю её."]
+
+
+def typed(text, speed=0.02):
+    for ch in text:
+        print(ch, end="", flush=True)
+        time.sleep(speed)
+    print()
+
+
+def live():
+    """Как в реальной ситуации: «агент» шлёт команды в запущенный TwoKey, карточки — в Telegram и окно программы."""
+    if os.name == "nt":
+        os.system("")
+    try:
+        g.post(f"http://127.0.0.1:{g.PORT}/check", {"tool": "Bash", "input": {"command": "ls"}, "agent": "ИИ-агент"}, 5)
+    except OSError:
+        print("TwoKey не запущен. Откройте TwoKey ярлыком и повторите, или запустите demo.bat offline — имитацию без сети.")
+        return 1
+    print(f"{C['b']}🤖 ИИ-агент начинает работу{C['x']} {C['dim']}(команды не выполняются, их проверяет TwoKey){C['x']}\n")
+    for (tool, inp), say in zip(g.DEMO, SAY):
+        print(f"{C['ag']}🤖 Агент:{C['x']} ", end="")
+        typed(say)
+        print(f"{C['dim']}   → {tool}: {g.shown(inp)[:100]}{C['x']}")
+        res = g.post(f"http://127.0.0.1:{g.PORT}/check", {"tool": tool, "input": inp, "agent": "ИИ-агент"}, g.NO_LIMIT)
+        if res.get("decision") == "allow":
+            print(f"{C['ok']}   ✅ Выполнено{C['x']}\n")
+            continue
+        reason = str(res.get("reason", ""))
+        print(f"{C['no']}   ⛔ TwoKey: {res.get('choice') or 'отказ'}{C['x']}")
+        note = reason.split("вместо него:", 1)[1].split("Следуй", 1)[0].strip() if "вместо него:" in reason else ""
+        print(f"{C['ag']}🤖 Агент:{C['x']} ", end="")
+        typed(f"Понял, делаю так: {note}." if note else "Хорошо, не делаю. Предложу пользователю безопасный вариант.")
+        print()
+        time.sleep(1)
+    print(f"{C['b']}Готово: опасное не выполнилось без вашего решения.{C['x']}")
+    return 0
+
+
 def main():
+    if "--live" in sys.argv:
+        return live()
     auto = "--auto" in sys.argv
     delay = float(sys.argv[sys.argv.index("--delay") + 1]) if "--delay" in sys.argv else 2.5
     if os.name == "nt":
